@@ -1,12 +1,10 @@
 import { FormEvent, useMemo, useState } from 'react';
 import {
-    Command,
     Search,
-    Library,
-    Settings,
     Plus,
     X,
-    Sparkles,
+    Minus,
+    Square,
     ArrowRight,
     Cpu,
     GitBranch,
@@ -14,6 +12,7 @@ import {
     ExternalLink
 } from 'lucide-react';
 import './App.css';
+import {Quit, WindowMinimise, WindowToggleMaximise} from '../wailsjs/runtime';
 
 type TabKind = 'search' | 'generated';
 
@@ -35,14 +34,6 @@ const starterTabs: Tab[] = [
     },
 ];
 
-const suggestions = [
-    'Create a habit tracker with charts',
-    'Open github.com',
-    'Generate a client CRM dashboard',
-    'Build a travel planner for Tokyo',
-    'Search best image APIs for apps',
-];
-
 function classifyQuery(query: string): TabKind {
     const normalized = query.toLowerCase();
     const generateWords = ['create', 'generate', 'build', 'make', 'design'];
@@ -61,7 +52,6 @@ function App() {
     const [tabs, setTabs] = useState<Tab[]>(starterTabs);
     const [activeTabId, setActiveTabId] = useState(1);
     const [command, setCommand] = useState('');
-    const [activeMenu, setActiveMenu] = useState<'workspace' | 'library' | 'settings'>('workspace');
 
     const activeTab = useMemo(
         () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -131,33 +121,6 @@ function App() {
 
     return (
         <main className="app-shell">
-            <aside className="rail">
-                <div className="brand-mark" title="Morph">
-                    <Command size={22} strokeWidth={2.5} />
-                </div>
-                <button
-                    className={`rail-button ${activeMenu === 'workspace' ? 'active' : ''}`}
-                    onClick={() => setActiveMenu('workspace')}
-                    title="Workspace"
-                >
-                    <Search size={20} />
-                </button>
-                <button
-                    className={`rail-button ${activeMenu === 'library' ? 'active' : ''}`}
-                    onClick={() => setActiveMenu('library')}
-                    title="Library"
-                >
-                    <Library size={20} />
-                </button>
-                <button
-                    className={`rail-button ${activeMenu === 'settings' ? 'active' : ''}`}
-                    onClick={() => setActiveMenu('settings')}
-                    title="Settings"
-                >
-                    <Settings size={20} />
-                </button>
-            </aside>
-
             <section className="workspace">
                 <div className="tab-strip">
                     <div className="tabs">
@@ -186,6 +149,17 @@ function App() {
                     <button className="new-tab" onClick={addTab} title="New tab" type="button">
                         <Plus size={16} strokeWidth={2.5} />
                     </button>
+                    <div className="window-controls">
+                        <button onClick={WindowMinimise} title="Minimize" type="button">
+                            <Minus size={15} strokeWidth={2.2} />
+                        </button>
+                        <button onClick={WindowToggleMaximise} title="Maximize" type="button">
+                            <Square size={13} strokeWidth={2.1} />
+                        </button>
+                        <button className="close-window" onClick={Quit} title="Close" type="button">
+                            <X size={15} strokeWidth={2.2} />
+                        </button>
+                    </div>
                 </div>
 
                 <form className="command-bar" onSubmit={submitSearch}>
@@ -195,7 +169,7 @@ function App() {
                     <input
                         autoFocus
                         onChange={(event) => setCommand(event.target.value)}
-                        placeholder="Search the web, open a site, or generate an app..."
+                        placeholder="What app or website do you want to open?"
                         value={command}
                     />
                     <button type="submit">
@@ -206,19 +180,9 @@ function App() {
                 <section className="content">
                     {!activeTab.query ? (
                         <div className="empty-state">
-                            <p className="eyebrow">Morph command center</p>
-                            <h1>Search for anything. Generate what does not exist yet.</h1>
-                            <div className="suggestion-grid">
-                                {suggestions.map((suggestion) => (
-                                    <button
-                                        key={suggestion}
-                                        onClick={() => runCommand(suggestion)}
-                                        type="button"
-                                    >
-                                        {suggestion}
-                                    </button>
-                                ))}
-                            </div>
+                            <p className="brand-name">Morph</p>
+                            <h1>What should we open next?</h1>
+                            <p>Search the web, open a website, or describe an app to create.</p>
                         </div>
                     ) : activeTab.kind === 'generated' ? (
                         <div className="generated-view">
