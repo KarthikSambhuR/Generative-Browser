@@ -1,9 +1,13 @@
 html {
     background: #0c1017;
+    height: 100%;
+    overflow: hidden;
 }
 
 body {
     margin: 0;
+    height: 100%;
+    overflow: hidden;
     color: #eef3f8;
     font-family: 'Urbanist', Inter, system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -21,5 +25,6 @@ input {
 }
 
 #root {
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
 }

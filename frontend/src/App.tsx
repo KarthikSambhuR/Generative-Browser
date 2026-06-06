@@ -16,6 +16,7 @@ import {GeneratePageStream, SearchSuggestions} from '../wailsjs/go/main/App';
 import {ClipboardSetText, EventsOn, Quit, WindowMinimise, WindowToggleMaximise} from '../wailsjs/runtime';
 
 type TabKind = 'search' | 'generated';
+type SearchMode = 'sourced' | 'creative';
 type SuggestionStatus = 'idle' | 'loading' | 'done' | 'error';
 type PageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -50,6 +51,7 @@ type Tab = {
     title: string;
     query: string;
     kind: TabKind;
+    searchMode: SearchMode;
     createdAt: string;
     suggestions: AppSuggestion[];
     suggestionStatus: SuggestionStatus;
@@ -102,6 +104,7 @@ type PageSpec = {
     title: string;
     subtitle?: string;
     mode?: string;
+    sourceUrl?: string;
     customHtml?: string;
     customCss?: string;
     customJs?: string;
@@ -116,6 +119,7 @@ type TabHistoryEntry = {
     title: string;
     query: string;
     kind: TabKind;
+    searchMode: SearchMode;
     suggestions: AppSuggestion[];
     suggestionStatus: SuggestionStatus;
     suggestionError?: string;
@@ -138,6 +142,7 @@ const starterTabs: Tab[] = [
         title: 'New search',
         query: '',
         kind: 'search',
+        searchMode: 'sourced',
         createdAt: 'Just now',
         suggestions: [],
         suggestionStatus: 'idle',
@@ -151,6 +156,10 @@ function classifyQuery(query: string): TabKind {
     const normalized = query.toLowerCase();
     const generateWords = ['create', 'generate', 'build', 'make', 'design'];
     return generateWords.some((word) => normalized.includes(word)) ? 'generated' : 'search';
+}
+
+function pageModeQuery(mode: SearchMode, query: string) {
+    return `__morph_mode:${mode}__\n${query}`;
 }
 
 function titleFromQuery(query: string) {
@@ -237,6 +246,7 @@ function normalizePageSpec(raw: unknown, result: SearchResult): PageSpec {
         title: typeof value.title === 'string' && value.title.trim() ? value.title : result.title,
         subtitle: typeof value.subtitle === 'string' ? value.subtitle : result.description,
         mode: typeof value.mode === 'string' ? value.mode : 'mini_app',
+        sourceUrl: typeof value.sourceUrl === 'string' ? value.sourceUrl : generatedPageUrl(result),
         customHtml: typeof value.customHtml === 'string' ? value.customHtml : undefined,
         customCss: typeof value.customCss === 'string' ? value.customCss : undefined,
         customJs: typeof value.customJs === 'string' ? value.customJs : undefined,
@@ -259,14 +269,20 @@ function normalizePageSpec(raw: unknown, result: SearchResult): PageSpec {
 }
 
 function tabToResult(tab: Tab): SearchResult {
-    return {
-        id: `${tab.id}`,
-        title: tab.title || tab.query || 'Generated page',
-        description: tab.pageSpec?.subtitle || 'A generated Morph page.',
-        kind: tab.kind,
+    const title = tab.title || tab.query || 'Generated page';
+        return {
+            id: `${tab.id}`,
+            title,
+            description: tab.pageSpec?.subtitle || 'A generated Morph page.',
+            kind: tab.kind,
         query: tab.query || tab.title,
-        url: `https://apps.morph.local/${slugify(tab.title || tab.query || 'generated-page')}`,
+        url: generatedPageUrl({title, query: tab.query || title, kind: tab.kind}),
     };
+}
+
+function generatedPageUrl(result: SearchResult | {title: string; query: string; kind?: string}) {
+    const host = result.kind === 'website' ? 'www.morph.local' : 'apps.morph.local';
+    return `https://${host}/${slugify(result.title || result.query)}`;
 }
 
 function fallbackPageSpec(result: SearchResult): PageSpec {
@@ -274,6 +290,7 @@ function fallbackPageSpec(result: SearchResult): PageSpec {
         title: result.title,
         subtitle: result.description,
         mode: 'mini_app',
+        sourceUrl: generatedPageUrl(result),
         customHtml: `<main class="fallback"><section><p class="eyebrow">Generated fallback</p><h1>${result.title}</h1><p>${result.description}</p><button id="pulse">Pulse idea</button><div id="notes"></div></section></main>`,
         customCss: `.fallback{min-height:100%;display:grid;place-items:center;padding:40px;background:radial-gradient(circle at 20% 10%,#8ab4f844,transparent 28%),#101114;color:#f5f7fb;font-family:Inter,Segoe UI,sans-serif}.fallback section{max-width:760px;border:1px solid rgba(255,255,255,.14);border-radius:28px;padding:36px;background:rgba(255,255,255,.06)}.eyebrow{color:#8ab4f8;text-transform:uppercase;font-size:12px;font-weight:800}.fallback h1{font-size:48px;margin:8px 0}.fallback p{color:#bdc1c6;line-height:1.6}.fallback button{height:42px;border:0;border-radius:999px;background:#8ab4f8;color:#101114;font-weight:800;padding:0 18px}#notes{margin-top:18px;color:#71e39f}`,
         customJs: `let n=0;document.getElementById('pulse')?.addEventListener('click',()=>{n++;document.getElementById('notes').textContent='Generated signal '+n;});`,
@@ -324,6 +341,7 @@ function tabToHistoryEntry(tab: Tab): TabHistoryEntry {
         title: tab.title,
         query: tab.query,
         kind: tab.kind,
+        searchMode: tab.searchMode,
         suggestions: tab.suggestions,
         suggestionStatus: tab.suggestionStatus,
         suggestionError: tab.suggestionError,
@@ -362,6 +380,7 @@ function App() {
             title: 'New search',
             query: '',
             kind: 'search',
+            searchMode: activeTab?.searchMode || 'sourced',
             createdAt: 'Just now',
             suggestions: [],
             suggestionStatus: 'idle',
@@ -411,6 +430,20 @@ function App() {
         }
 
         const requestId = newRequestID();
+        const selectedMode = tabs.find((tab) => tab.id === tabId)?.searchMode || 'sourced';
+        if (selectedMode === 'sourced') {
+            const result: SearchResult = {
+                id: `sourced-${slugify(trimmedQuery)}`,
+                title: trimmedQuery,
+                description: 'A sourced page built from DuckDuckGo results and scraped source metadata.',
+                kind: 'website',
+                query: trimmedQuery,
+                url: `https://sources.morph.local/${slugify(trimmedQuery)}`,
+            };
+            loadPageInTab(tabId, result, true, 'sourced');
+            return;
+        }
+
         setTabs((currentTabs) =>
             currentTabs.map((tab) =>
                 tab.id === tabId
@@ -419,7 +452,8 @@ function App() {
                         history: [...tab.history, tabToHistoryEntry(tab)],
                         title: titleFromQuery(trimmedQuery),
                         query: trimmedQuery,
-                        kind: classifyQuery(trimmedQuery),
+                        kind: 'search',
+                        searchMode: 'creative',
                         suggestions: [],
                         suggestionStatus: 'loading',
                         suggestionError: undefined,
@@ -448,7 +482,7 @@ function App() {
         });
     }
 
-    function loadPageInTab(tabId: number, result: SearchResult, pushHistory = true) {
+    function loadPageInTab(tabId: number, result: SearchResult, pushHistory = true, mode: SearchMode = 'creative') {
         const requestId = newRequestID();
         setTabs((currentTabs) =>
             currentTabs.map((tab) =>
@@ -459,6 +493,7 @@ function App() {
                         title: titleFromQuery(result.title),
                         query: result.query,
                         kind: 'generated',
+                        searchMode: mode,
                         requestId,
                         pageStatus: 'loading',
                         pageSpec: undefined,
@@ -469,7 +504,7 @@ function App() {
             ),
         );
 
-        GeneratePageStream(result.title, result.description, result.query, tabId, requestId)
+        GeneratePageStream(result.title, result.description, pageModeQuery(mode, result.query), tabId, requestId)
             .catch((error) => {
                 setTabs((currentTabs) =>
                     currentTabs.map((tab) =>
@@ -489,7 +524,7 @@ function App() {
     function openInSameTab(result: SearchResult) {
         setContextMenu(null);
         setCommand(result.query);
-        loadPageInTab(activeTabId, result);
+        loadPageInTab(activeTabId, result, true, activeTab.searchMode === 'sourced' ? 'sourced' : 'creative');
     }
 
     function openInNewTab(result: SearchResult) {
@@ -501,6 +536,7 @@ function App() {
             title: titleFromQuery(result.query),
             query: result.query,
             kind: 'generated',
+            searchMode: activeTab.searchMode === 'sourced' ? 'sourced' : 'creative',
             createdAt: 'Just now',
             suggestions: [],
             suggestionStatus: 'idle',
@@ -514,7 +550,21 @@ function App() {
         setTabs((currentTabs) => [...currentTabs, newTab]);
         setActiveTabId(nextId);
         setCommand(result.query);
-        loadPageInTab(nextId, result, false);
+        loadPageInTab(nextId, result, false, newTab.searchMode);
+    }
+
+    function setSearchMode(mode: SearchMode) {
+        setTabs((currentTabs) =>
+            currentTabs.map((tab) =>
+                tab.id === activeTabId
+                    ? {
+                        ...tab,
+                        searchMode: mode,
+                        suggestionStatus: tab.query ? tab.suggestionStatus : 'idle',
+                    }
+                    : tab,
+            ),
+        );
     }
 
     function goBack() {
@@ -802,7 +852,7 @@ function App() {
                         <input
                             autoFocus
                             onChange={(event) => setCommand(event.target.value)}
-                            placeholder="What app or website do you want to open?"
+                            placeholder={activeTab.searchMode === 'sourced' ? 'Search the web and build a sourced page' : 'Search for a creative generated page'}
                             value={command}
                         />
                         <button type="submit">
@@ -814,9 +864,32 @@ function App() {
                 <section className="content" onScroll={handleContentScroll}>
                     {!activeTab.query ? (
                         <div className="empty-state">
-                            <p className="brand-name">Morph</p>
-                            <h1>What should we open next?</h1>
-                            <p>Search the web, open a website, or describe an app to create.</p>
+                            <div className="start-panel">
+                                <div className="start-copy">
+                                    <span>Search mode</span>
+                                    <p>
+                                        {activeTab.searchMode === 'sourced'
+                                            ? 'Build a clean page from web sources, citations, and scraped context.'
+                                            : 'Explore generated ideas first, then open one as a custom page.'}
+                                    </p>
+                                </div>
+                                <div className="mode-toggle" role="group" aria-label="Search mode">
+                                    <button
+                                        className={activeTab.searchMode === 'sourced' ? 'active' : ''}
+                                        onClick={() => setSearchMode('sourced')}
+                                        type="button"
+                                    >
+                                        Sourced
+                                    </button>
+                                    <button
+                                        className={activeTab.searchMode === 'creative' ? 'active' : ''}
+                                        onClick={() => setSearchMode('creative')}
+                                        type="button"
+                                    >
+                                        Creative
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     ) : activeTab.kind === 'generated' ? (
                         <GeneratedPageView tab={activeTab} />
@@ -824,7 +897,7 @@ function App() {
                         <div className="search-view">
                             <div>
                                 <p className="eyebrow">
-                                    {activeTab.suggestionStatus === 'loading' ? 'Thinking' : 'Suggestions'}
+                                    {activeTab.suggestionStatus === 'loading' ? 'Dreaming' : 'Dream Search'}
                                 </p>
                                 <h1>{activeTab.query}</h1>
                                 {activeTab.suggestionStatus === 'loading' && activeTab.suggestions.length === 0 ? (
@@ -910,7 +983,7 @@ function GeneratedPageView({tab}: {tab: Tab}) {
             <div className="page-loading">
                 <Loader2 className="spin" size={18} />
                 <span>Streaming custom interface...</span>
-                <small>{tab.pageStream ? `${Math.min(tab.pageStream.length, 9999)} chars` : 'waiting for first chunk'}</small>
+                <small>{tab.pageStream ? `${tab.pageStream.length.toLocaleString()} chars` : 'waiting for first chunk'}</small>
             </div>
         );
     }
@@ -989,8 +1062,19 @@ function CustomGeneratedFrame({spec}: {spec: PageSpec}) {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-html,body{margin:0;min-height:100%;background:#101114;color:#f5f7fb;}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root{color-scheme:dark;--morph-accent:#8ab4f8;--morph-bg:#101114;--morph-panel:rgba(255,255,255,.07);--morph-line:rgba(255,255,255,.14);--morph-text:#f5f7fb;--morph-muted:#b7bec9}
+html,body{margin:0;min-height:100%;background:var(--morph-bg);color:var(--morph-text);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;scrollbar-color:rgba(255,255,255,.35) transparent}
 *{box-sizing:border-box}
+body{min-height:100vh}
+button,input,select,textarea{font:inherit}
+button{min-height:40px;border:0;border-radius:12px;background:var(--morph-accent);color:#101114;padding:0 16px;font-weight:750;cursor:pointer;box-shadow:0 10px 24px rgba(0,0,0,.18);transition:transform .16s ease,filter .16s ease}
+button:hover{filter:brightness(1.06);transform:translateY(-1px)}
+button:active{transform:translateY(0)}
+input,select,textarea{border:1px solid var(--morph-line);border-radius:12px;background:rgba(255,255,255,.08);color:var(--morph-text);padding:11px 12px;outline:none}
+a{color:var(--morph-accent)}
+canvas{max-width:100%}
+main,section{max-width:100%}
 ${spec.customCss || ''}
 </style>
 </head>
@@ -1009,10 +1093,17 @@ ${spec.customJs || ''}
 
     return (
         <div className="custom-page-shell">
-            <div className="custom-page-meta">
-                <span>{spec.mode || 'mini app'}</span>
-                <strong>{spec.title}</strong>
-                {spec.subtitle ? <p>{spec.subtitle}</p> : null}
+            <div className="generated-browser-bar">
+                <div className="browser-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+                <div className="generated-url-bar">
+                    <span className="lock-dot"></span>
+                    <strong>{spec.sourceUrl || generatedPageUrl({title: spec.title, query: spec.title})}</strong>
+                </div>
+                <span className="page-mode">{spec.mode || 'mini app'}</span>
             </div>
             <iframe
                 className="custom-page-frame"

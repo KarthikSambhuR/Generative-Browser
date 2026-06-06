@@ -10,10 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,9 +24,13 @@ import (
 )
 
 const openAIResponsesURL = "https://api.openai.com/v1/responses"
+const suggestionModel = "gpt-5.4-nano"
+const pageGenerationModel = "gpt-5.4-nano"
 const maxSuggestions = 5
 const cacheDirName = "cache"
-const cacheVersion = "v3-ranked-creativity"
+const cacheVersion = "v11-search-modes"
+const sourcedQueryPrefix = "__morph_mode:sourced__"
+const creativeQueryPrefix = "__morph_mode:creative__"
 
 // App struct
 type App struct {
@@ -57,21 +64,28 @@ type pageEvent struct {
 }
 
 type responsesRequest struct {
-	Model           string          `json:"model"`
-	Instructions    string          `json:"instructions"`
-	Input           string          `json:"input"`
-	MaxOutputTokens int             `json:"max_output_tokens"`
-	Stream          bool            `json:"stream"`
-	Reasoning       reasoningConfig `json:"reasoning"`
-	Text            textConfig      `json:"text"`
+	Model           string           `json:"model"`
+	Instructions    string           `json:"instructions"`
+	Input           string           `json:"input"`
+	MaxOutputTokens int              `json:"max_output_tokens"`
+	Stream          bool             `json:"stream"`
+	Reasoning       *reasoningConfig `json:"reasoning,omitempty"`
+	Text            *textConfig      `json:"text,omitempty"`
+	Store           bool             `json:"store,omitempty"`
 }
 
 type reasoningConfig struct {
-	Effort string `json:"effort"`
+	Effort  string `json:"effort"`
+	Summary string `json:"summary,omitempty"`
 }
 
 type textConfig struct {
-	Verbosity string `json:"verbosity"`
+	Verbosity string      `json:"verbosity"`
+	Format    *textFormat `json:"format,omitempty"`
+}
+
+type textFormat struct {
+	Type string `json:"type"`
 }
 
 type responseStreamEvent struct {
@@ -105,6 +119,13 @@ type responseOutput struct {
 type responseContent struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+}
+
+type webSource struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet"`
+	Image   string `json:"image,omitempty"`
 }
 
 // NewApp creates a new App application struct
@@ -171,6 +192,8 @@ func (a *App) GeneratePageStream(title string, description string, query string,
 	title = strings.TrimSpace(title)
 	description = strings.TrimSpace(description)
 	query = strings.TrimSpace(query)
+	mode, cleanQuery := parsePageMode(query)
+	query = cleanQuery
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
 		requestID = newRequestID()
@@ -182,7 +205,7 @@ func (a *App) GeneratePageStream(title string, description string, query string,
 		return "", errors.New("title or query is required")
 	}
 
-	if cached, ok := readPageCache(title, description, query); ok {
+	if cached, ok := readPageCache(title, description, mode+"\n"+query); ok {
 		fmt.Printf("[Morph] page cache hit requestID=%s title=%q query=%q bytes=%d\n", requestID, title, query, len(cached))
 		go func() {
 			a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
@@ -209,61 +232,114 @@ func (a *App) GeneratePageStream(title string, description string, query string,
 		return requestID, nil
 	}
 
-	go a.streamPage(requestID, tabID, title, description, query, apiKey)
+	go a.streamPage(requestID, tabID, title, description, query, mode, apiKey)
 	return requestID, nil
 }
 
-func (a *App) streamPage(requestID string, tabID int64, title string, description string, query string, apiKey string) {
-	fmt.Printf("[Morph] page stream started requestID=%s tabID=%d title=%q query=%q provider=openai model=gpt-5-nano\n", requestID, tabID, title, query)
+func parsePageMode(query string) (string, string) {
+	query = strings.TrimSpace(query)
+	switch {
+	case strings.HasPrefix(query, sourcedQueryPrefix):
+		return "sourced", strings.TrimSpace(strings.TrimPrefix(query, sourcedQueryPrefix))
+	case strings.HasPrefix(query, creativeQueryPrefix):
+		return "creative", strings.TrimSpace(strings.TrimPrefix(query, creativeQueryPrefix))
+	default:
+		return "creative", query
+	}
+}
+
+func pageModeQuery(mode string, query string) string {
+	if mode == "sourced" {
+		return sourcedQueryPrefix + "\n" + query
+	}
+	return creativeQueryPrefix + "\n" + query
+}
+
+func (a *App) streamPage(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string) {
+	fmt.Printf("[Morph] page stream started requestID=%s tabID=%d mode=%s title=%q query=%q provider=openai model=%s\n", requestID, tabID, mode, title, query, pageGenerationModel)
 	a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
 
+	sources := []webSource{}
+	if mode == "sourced" && !isSimpleToolQuery(query+" "+title) {
+		foundSources, err := webSearch(queryForWebSearch(title, description, query), 6)
+		if err != nil {
+			fmt.Printf("[Morph] web search failed requestID=%s query=%q error=%v\n", requestID, query, err)
+			a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: "[web] Search failed; generating without live sources.\n"})
+		} else {
+			sources = foundSources
+			fmt.Printf("[Morph] web search completed requestID=%s query=%q sources=%d\n", requestID, query, len(sources))
+			a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: fmt.Sprintf("[web] Found %d source(s).\n", len(sources))})
+		}
+	}
+
+	spec, err := a.generateFullPageFromSources(requestID, tabID, title, description, query, mode, apiKey, sources)
+	if err != nil {
+		a.emitPageError(requestID, tabID, title, query, err)
+		return
+	}
+	if mode == "sourced" {
+		spec = ensureSourcesInSpec(spec, sources)
+	}
+	fmt.Printf("[Morph] page stream completed requestID=%s bytes=%d sources=%d\n", requestID, len(spec), len(sources))
+	if err := writePageCache(title, description, mode+"\n"+query, spec); err != nil {
+		fmt.Printf("[Morph] page cache write failed requestID=%s error=%v\n", requestID, err)
+	}
+	a.emitPage("page:done", pageEvent{
+		RequestID: requestID,
+		TabID:     tabID,
+		Title:     title,
+		Spec:      spec,
+	})
+}
+
+func (a *App) generateFullPageFromSources(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource) (string, error) {
 	body := responsesRequest{
-		Model:           "gpt-5-nano",
-		Instructions:    "You are Morph's extreme creative page generator. Return only JSON. No markdown. Create a wildly custom, polished mini web app for the clicked result. Every page must have a unique visual layout and custom interface. Use modern design standards: clear hierarchy, responsive layout, accessible contrast, polished spacing, stable controls, and professional interaction states. If using fonts, load Google Fonts with @import in customCss. If icons are useful, use lucide-style inline SVG icons or simple line icons, not emoji. Include customHtml, customCss, and customJs. The JS must be self-contained browser JavaScript only; no imports, no network, no localStorage, no parent/window.top access. It may use DOM event listeners, timers, canvas, buttons, forms, generated data, animations, and local variables. Schema: {\"title\":\"string\",\"subtitle\":\"string\",\"mode\":\"mini_app|article|dashboard|tool|game|gallery\",\"customHtml\":\"string\",\"customCss\":\"string\",\"customJs\":\"string\"}. Make the HTML body fragment complete enough to be useful. If the search is simple, make a playful focused single-purpose interface instead of a generic page.",
-		Input:           fmt.Sprintf("Clicked result title: %s\nDescription: %s\nOriginal query: %s\nGenerate a unique custom HTML/CSS/JS page JSON now.", title, description, query),
-		MaxOutputTokens: 9000,
+		Model:           pageGenerationModel,
+		Instructions:    fullPageInstructions(mode),
+		Input:           pageGenerationBrief(title, description, query, mode, sources),
+		MaxOutputTokens: 16000,
 		Stream:          true,
-		Reasoning: reasoningConfig{
-			Effort: "minimal",
+		Reasoning: &reasoningConfig{
+			Effort: "low",
 		},
-		Text: textConfig{
-			Verbosity: "low",
+		Text: &textConfig{
+			Verbosity: "medium",
+			Format: &textFormat{
+				Type: "json_object",
+			},
 		},
+		Store: true,
 	}
 
 	payload, err := json.Marshal(body)
 	if err != nil {
-		a.emitPageError(requestID, tabID, title, query, err)
-		return
+		return "", err
 	}
 
 	req, err := http.NewRequestWithContext(a.ctx, http.MethodPost, openAIResponsesURL, bytes.NewReader(payload))
 	if err != nil {
-		a.emitPageError(requestID, tabID, title, query, err)
-		return
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{Timeout: 150 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.emitPageError(requestID, tabID, title, query, err)
-		return
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		a.emitPageError(requestID, tabID, title, query, fmt.Errorf("OpenAI page stream returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody))))
-		return
+		return "", fmt.Errorf("OpenAI page stream returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
 	}
 
 	content := strings.Builder{}
 	seenEventTypes := map[string]int{}
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	scanner.Buffer(make([]byte, 4096), 8*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -285,9 +361,11 @@ func (a *App) streamPage(requestID string, tabID int64, title string, descriptio
 		if event.Type != "" {
 			seenEventTypes[event.Type]++
 		}
+		if event.Type == "response.incomplete" {
+			fmt.Printf("[Morph] OpenAI page response incomplete requestID=%s reason=%s event=%s\n", requestID, incompleteReason(event), truncateForLog(data, 700))
+		}
 		if event.Error != nil {
-			a.emitPageError(requestID, tabID, title, query, fmt.Errorf("OpenAI page stream error type=%s code=%s message=%s", event.Error.Type, event.Error.Code, event.Error.Message))
-			return
+			return "", fmt.Errorf("OpenAI page stream error type=%s code=%s message=%s", event.Error.Type, event.Error.Code, event.Error.Message)
 		}
 
 		textDelta := textFromStreamEvent(event)
@@ -302,27 +380,382 @@ func (a *App) streamPage(requestID string, tabID int64, title string, descriptio
 			Chunk:     textDelta,
 		})
 	}
-
 	if err := scanner.Err(); err != nil {
-		a.emitPageError(requestID, tabID, title, query, err)
-		return
+		return "", err
 	}
 
 	spec := extractJSONObject(content.String())
 	if spec == "" {
-		fmt.Printf("[Morph] page stream returned no JSON; using fallback requestID=%s eventTypes=%v raw=%s\n", requestID, seenEventTypes, truncateForLog(content.String(), 900))
-		spec = fallbackPageJSON(title, description, query)
+		fmt.Printf("[Morph] page stream returned no JSON requestID=%s eventTypes=%v raw=%s\n", requestID, seenEventTypes, truncateForLog(content.String(), 1200))
+		return "", fmt.Errorf("page generation returned no JSON")
 	}
-	fmt.Printf("[Morph] page stream completed requestID=%s bytes=%d eventTypes=%v\n", requestID, len(spec), seenEventTypes)
-	if err := writePageCache(title, description, query, spec); err != nil {
-		fmt.Printf("[Morph] page cache write failed requestID=%s error=%v\n", requestID, err)
+	return spec, nil
+}
+
+func pageGenerationBrief(title string, description string, query string, mode string, sources []webSource) string {
+	sourceJSON, err := json.MarshalIndent(sources, "", "  ")
+	if err != nil {
+		sourceJSON = []byte("[]")
 	}
-	a.emitPage("page:done", pageEvent{
-		RequestID: requestID,
-		TabID:     tabID,
-		Title:     title,
-		Spec:      spec,
-	})
+	return fmt.Sprintf(`Build this Morph generated website/app.
+
+Title: %s
+Description: %s
+Original query: %s
+Search mode: %s
+Web sources JSON: %s
+
+Rules:
+- Return one valid JSON object only. No markdown, no code fences, no prose outside JSON.
+- Schema: {"title":"string","subtitle":"string","mode":"mini_app|article|dashboard|tool|game|gallery","sourceUrl":"string","customHtml":"string","customCss":"string","customJs":"string","sections":[]}
+- customHtml is a body fragment only. Do not include html/head/body/style/script tags.
+- customCss is complete CSS. Use @import for Google Fonts when useful.
+- In sourced mode: use no JavaScript unless the query is a simple working tool like calculator, todo, notes, timer, converter, or checklist. For normal informational sourced searches, customJs should be an empty string.
+- In creative mode: JavaScript is allowed when it makes the generated page more alive or functional.
+- If sourced mode gets an informational/real topic, use the web sources as the factual basis and cite them visibly in the page.
+- Include a polished Sources section in customHtml with links to the provided source URLs when sources are provided.
+- If a source has an image URL, use it as a visual asset with alt text and nearby attribution.
+- Use lucide-style inline SVG icons where icons help. Do not load icon libraries.
+- Use modern design standards: responsive layout, strong typography, accessible contrast, stable spacing, polished controls, and no browser-default-looking UI.
+- If sourced mode receives a complex app/game request that cannot be built well as simple HTML/CSS, generate a beautiful explanation page saying this is better for Creative Search and why.
+- If sourced mode receives a simple tool request, generate the full working tool and use JS only for that tool.
+- If creative mode receives an app/tool/game request, generate the full functional UI from this single request.
+- Match the user's intent directly first; add creativity only after the direct result is solved.`, title, description, query, mode, string(sourceJSON))
+}
+
+func fullPageInstructions(mode string) string {
+	if mode == "sourced" {
+		return "You are Morph's sourced-search page generator. Create one accurate, beautiful HTML/CSS page from provided web sources. Use customJs only for simple tools that need interaction. Cite sources visibly. For complex games/apps, politely route the user to Creative Search. Return only one JSON object."
+	}
+	return "You are Morph's creative-search page generator. Create one coherent, imaginative, polished generated page as JSON containing customHtml, customCss, and customJs. Do not use web citations unless they are provided. Return only one JSON object."
+}
+
+func queryForWebSearch(title string, description string, query string) string {
+	for _, value := range []string{query, title, description} {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return title
+}
+
+func isSimpleToolQuery(value string) bool {
+	value = strings.ToLower(value)
+	simpleTools := []string{
+		"calculator", "calc", "todo", "to-do", "task list", "notes", "notepad",
+		"timer", "stopwatch", "countdown", "pomodoro", "converter", "checklist",
+		"unit converter", "currency converter", "password generator", "qr code",
+	}
+	for _, tool := range simpleTools {
+		if strings.Contains(value, tool) {
+			return true
+		}
+	}
+	return false
+}
+
+func webSearch(query string, limit int) ([]webSource, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	searchURL := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
+	req, err := http.NewRequest(http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 Morph/1.0")
+
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("search returned %s", resp.Status)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return nil, err
+	}
+	sources := parseDuckDuckGoResults(string(body), limit)
+	enrichSourceImages(client, sources)
+	return sources, nil
+}
+
+func parseDuckDuckGoResults(body string, limit int) []webSource {
+	linkRe := regexp.MustCompile(`(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	snippetRe := regexp.MustCompile(`(?is)<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>|<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</div>`)
+	linkMatches := linkRe.FindAllStringSubmatchIndex(body, -1)
+	snippetMatches := snippetRe.FindAllStringSubmatch(body, -1)
+	snippets := make([]string, 0, len(snippetMatches))
+	for _, match := range snippetMatches {
+		text := ""
+		if len(match) > 1 && match[1] != "" {
+			text = match[1]
+		} else if len(match) > 2 {
+			text = match[2]
+		}
+		snippets = append(snippets, cleanHTMLText(text))
+	}
+
+	results := []webSource{}
+	seen := map[string]bool{}
+	for index, match := range linkMatches {
+		if len(results) >= limit {
+			break
+		}
+		rawHref := body[match[2]:match[3]]
+		rawTitle := body[match[4]:match[5]]
+		resolved := resolveDuckDuckGoURL(cleanAttr(rawHref))
+		if resolved == "" || seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
+		snippet := ""
+		if index < len(snippets) {
+			snippet = snippets[index]
+		}
+		results = append(results, webSource{
+			Title:   cleanHTMLText(rawTitle),
+			URL:     resolved,
+			Snippet: snippet,
+		})
+	}
+	return results
+}
+
+func enrichSourceImages(client *http.Client, sources []webSource) {
+	for index := range sources {
+		if index >= 4 {
+			return
+		}
+		image := fetchSourceImage(client, sources[index].URL)
+		if image != "" {
+			sources[index].Image = image
+		}
+	}
+}
+
+func fetchSourceImage(client *http.Client, sourceURL string) string {
+	req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 Morph/1.0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if err != nil {
+		return ""
+	}
+	body := string(bodyBytes)
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?is)<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']`),
+		regexp.MustCompile(`(?is)<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']`),
+		regexp.MustCompile(`(?is)<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']`),
+		regexp.MustCompile(`(?is)<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']`),
+	}
+	for _, pattern := range patterns {
+		match := pattern.FindStringSubmatch(body)
+		if len(match) < 2 {
+			continue
+		}
+		image := cleanAttr(match[1])
+		if image == "" {
+			continue
+		}
+		if absolute, ok := absoluteURL(sourceURL, image); ok {
+			return absolute
+		}
+	}
+	return ""
+}
+
+func resolveDuckDuckGoURL(rawHref string) string {
+	rawHref = html.UnescapeString(strings.TrimSpace(rawHref))
+	parsed, err := url.Parse(rawHref)
+	if err == nil {
+		if uddg := parsed.Query().Get("uddg"); uddg != "" {
+			if decoded, decodeErr := url.QueryUnescape(uddg); decodeErr == nil {
+				return decoded
+			}
+			return uddg
+		}
+		if parsed.Scheme == "http" || parsed.Scheme == "https" {
+			return parsed.String()
+		}
+	}
+	return ""
+}
+
+func absoluteURL(baseURL string, value string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return "", false
+	}
+	if parsed.Scheme == "http" || parsed.Scheme == "https" {
+		return parsed.String(), true
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", false
+	}
+	return base.ResolveReference(parsed).String(), true
+}
+
+func cleanHTMLText(value string) string {
+	tagRe := regexp.MustCompile(`(?is)<[^>]+>`)
+	value = tagRe.ReplaceAllString(value, " ")
+	value = html.UnescapeString(value)
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func cleanAttr(value string) string {
+	return html.UnescapeString(strings.TrimSpace(value))
+}
+
+func ensureSourcesInSpec(spec string, sources []webSource) string {
+	if len(sources) == 0 {
+		return spec
+	}
+	var page map[string]interface{}
+	if err := json.Unmarshal([]byte(spec), &page); err != nil {
+		return spec
+	}
+	customHTML, _ := page["customHtml"].(string)
+	if strings.Contains(strings.ToLower(customHTML), "morph-source-list") {
+		return spec
+	}
+	customCSS, _ := page["customCss"].(string)
+	page["customHtml"] = customHTML + sourceSectionHTML(sources)
+	page["customCss"] = customCSS + sourceSectionCSS()
+	if page["sourceUrl"] == nil || strings.TrimSpace(fmt.Sprint(page["sourceUrl"])) == "" {
+		page["sourceUrl"] = sources[0].URL
+	}
+	bytes, err := json.Marshal(page)
+	if err != nil {
+		return spec
+	}
+	return string(bytes)
+}
+
+func sourceSectionHTML(sources []webSource) string {
+	var builder strings.Builder
+	builder.WriteString(`<section class="morph-source-list" aria-label="Sources"><h2>Sources</h2><div class="morph-source-grid">`)
+	for _, source := range sources {
+		builder.WriteString(`<a class="morph-source-card" href="`)
+		builder.WriteString(htmlText(source.URL, "#"))
+		builder.WriteString(`" target="_blank" rel="noreferrer">`)
+		if source.Image != "" {
+			builder.WriteString(`<img src="`)
+			builder.WriteString(htmlText(source.Image, ""))
+			builder.WriteString(`" alt="">`)
+		}
+		builder.WriteString(`<strong>`)
+		builder.WriteString(htmlText(source.Title, source.URL))
+		builder.WriteString(`</strong><span>`)
+		builder.WriteString(htmlText(source.Snippet, source.URL))
+		builder.WriteString(`</span></a>`)
+	}
+	builder.WriteString(`</div></section>`)
+	return builder.String()
+}
+
+func sourceSectionCSS() string {
+	return `.morph-source-list{margin:32px auto 0;max-width:1100px;padding:24px;border-radius:22px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);box-sizing:border-box}.morph-source-list h2{margin:0 0 16px;font-size:clamp(22px,3vw,34px)}.morph-source-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.morph-source-card{display:grid;gap:8px;text-decoration:none;color:inherit;padding:14px;border-radius:16px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.12);overflow:hidden}.morph-source-card:hover{transform:translateY(-1px)}.morph-source-card img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:12px}.morph-source-card strong{font-size:15px}.morph-source-card span{font-size:13px;line-height:1.45;opacity:.78}`
+}
+
+func assemblePageSpec(title string, description string, query string, html string, css string, js string) string {
+	spec := map[string]interface{}{
+		"title":      title,
+		"subtitle":   description,
+		"sourceUrl":  "https://apps.morph.local/" + slugForCache(title+" "+query),
+		"mode":       pageModeForQuery(title + " " + query),
+		"customHtml": html,
+		"customCss":  css,
+		"customJs":   js,
+		"sections":   []map[string]interface{}{},
+	}
+	bytes, err := json.Marshal(spec)
+	if err != nil {
+		return fallbackPageJSON(title, description, query)
+	}
+	return string(bytes)
+}
+
+func htmlText(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = fallback
+	}
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
+	return replacer.Replace(value)
+}
+
+func pageModeForQuery(value string) string {
+	lower := strings.ToLower(value)
+	switch {
+	case strings.Contains(lower, "game"):
+		return "game"
+	case strings.Contains(lower, "gallery"):
+		return "gallery"
+	case strings.Contains(lower, "dashboard"):
+		return "dashboard"
+	case strings.Contains(lower, "calculator") || strings.Contains(lower, "todo") || strings.Contains(lower, "notes") || strings.Contains(lower, "tool"):
+		return "tool"
+	default:
+		return "mini_app"
+	}
+}
+
+func stripCodeFences(value string) string {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "```") {
+		return value
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) <= 2 {
+		return value
+	}
+	if strings.HasPrefix(strings.TrimSpace(lines[0]), "```") {
+		lines = lines[1:]
+	}
+	if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "```") {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func slugForCache(value string) string {
+	value = normalizeCacheKey(value)
+	var builder strings.Builder
+	lastDash := false
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteRune(char)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteRune('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(builder.String(), "-")
+	if slug == "" {
+		return "generated-page"
+	}
+	return slug
 }
 
 func (a *App) emitPageError(requestID string, tabID int64, title string, query string, err error) {
@@ -355,20 +788,15 @@ func (a *App) GeneratePage(title string, description string, query string) (stri
 		return fallbackPageJSON(title, description, query), nil
 	}
 
-	fmt.Printf("[Morph] page generation started title=%q query=%q provider=openai model=gpt-5-nano\n", title, query)
+	fmt.Printf("[Morph] page generation started title=%q query=%q provider=openai model=%s\n", title, query, pageGenerationModel)
 
 	body := responsesRequest{
-		Model:           "gpt-5-nano",
+		Model:           pageGenerationModel,
 		Instructions:    "You create compact JSON UI specs for Morph. Return only JSON. No markdown. The JSON must be safe and renderable with this schema: {\"title\":\"string\",\"subtitle\":\"string\",\"theme\":{\"accent\":\"#hex\",\"mood\":\"dark|clean|neon|calm\"},\"sections\":[{\"type\":\"hero|stats|cards|list|form|table|controls\",\"title\":\"string\",\"description\":\"string\",\"items\":[{\"title\":\"string\",\"description\":\"string\",\"value\":\"string\",\"label\":\"string\"}],\"fields\":[{\"label\":\"string\",\"placeholder\":\"string\"}],\"actions\":[{\"label\":\"string\",\"action\":\"increment|toggle|append|highlight\",\"target\":\"string\"}]}]}. Make the UI feel cool, functional, and specific to the title. Include 5 to 7 sections. Include at least one controls or form section and one stats/cards/list section.",
 		Input:           fmt.Sprintf("Title: %s\nDescription: %s\nOriginal query: %s\nCreate the JSON UI page spec.", title, description, query),
 		MaxOutputTokens: 5000,
 		Stream:          false,
-		Reasoning: reasoningConfig{
-			Effort: "minimal",
-		},
-		Text: textConfig{
-			Verbosity: "low",
-		},
+		Store:           true,
 	}
 
 	payload, err := json.Marshal(body)
@@ -424,7 +852,7 @@ func (a *App) GeneratePage(title string, description string, query string) (stri
 }
 
 func (a *App) streamSuggestions(requestID string, tabID int64, query string, apiKey string) {
-	fmt.Printf("[Morph] suggestions request started requestID=%s tabID=%d query=%q provider=openai model=gpt-5-nano\n", requestID, tabID, query)
+	fmt.Printf("[Morph] suggestions request started requestID=%s tabID=%d query=%q provider=openai model=%s\n", requestID, tabID, query, suggestionModel)
 
 	a.emit("suggestions:started", suggestionEvent{
 		RequestID: requestID,
@@ -433,16 +861,19 @@ func (a *App) streamSuggestions(requestID string, tabID int64, query string, api
 	})
 
 	body := responsesRequest{
-		Model:           "gpt-5-nano",
-		Instructions:    "You are Morph's ranked suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"App or website title\",\"description\":\"One short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to run\"}]}. Return exactly 5 suggestions in one JSON object. Ranking rule: suggestion 1 must be the most literal, practical, and least creative interpretation of the user's search. For simple searches, names, people, portfolios, resumes, brands, local projects, or direct app requests, suggestion 1 should be something Morph can actually implement directly, like a profile page, portfolio, simple app, dashboard, search page, or practical website. Suggestions 2-4 should be more creative than suggestion 1 but still plausible and useful on average. Suggestion 5 can be very creative, speculative, or playful. For topics that do not exist yet or are future/fictional, like unreleased games, keep suggestion 1 as a practical tracker/info hub and put bigger creative ideas later.",
-		Input:           fmt.Sprintf("User searched: %q. Suggest available apps, generated app ideas, or websites that match.", query),
+		Model:           suggestionModel,
+		Instructions:    "You are Morph's Creative Search suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"Creative app or website title\",\"description\":\"One vivid short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to generate\"}]}. Return exactly 5 suggestions in one JSON object. Every result can be imaginative. Do not rank by practicality. Keep each result connected to the user's search, but give each one a distinct creative angle, interface idea, or generated experience.",
+		Input:           fmt.Sprintf("User searched in Creative Search: %q. Suggest 5 creative generated app or website results.", query),
 		MaxOutputTokens: 3500,
 		Stream:          true,
-		Reasoning: reasoningConfig{
-			Effort: "minimal",
+		Reasoning: &reasoningConfig{
+			Effort: "low",
 		},
-		Text: textConfig{
+		Text: &textConfig{
 			Verbosity: "low",
+			Format: &textFormat{
+				Type: "text",
+			},
 		},
 	}
 
@@ -728,6 +1159,7 @@ func incompleteReason(event responseStreamEvent) string {
 func ensureFiveSuggestions(query string, items []suggestion) []suggestion {
 	result := make([]suggestion, 0, maxSuggestions)
 	seen := map[string]bool{}
+
 	for _, item := range items {
 		item = normalizeSuggestion(item)
 		key := suggestionKey(item)
@@ -770,40 +1202,111 @@ func fallbackSuggestions(query string) []suggestion {
 
 	return []suggestion{
 		{
-			ID:          slug + "-studio",
-			Title:       titleCase(cleanQuery) + " Studio",
-			Description: "A focused workspace that turns the idea into a clean, usable mini app.",
+			ID:          slug + "-dreamlab",
+			Title:       titleCase(cleanQuery) + " Dream Lab",
+			Description: "A cinematic generated experience that remixes the idea into an interactive world.",
 			Kind:        "generated_app",
-			Query:       "Create a polished " + cleanQuery + " studio app",
+			Query:       "Create a wildly imaginative dream lab for " + cleanQuery,
 		},
 		{
-			ID:          slug + "-dashboard",
-			Title:       titleCase(cleanQuery) + " Dashboard",
-			Description: "A compact command center with cards, lists, progress, and quick actions.",
+			ID:          slug + "-studio",
+			Title:       titleCase(cleanQuery) + " Signal Studio",
+			Description: "A polished creative control room with strange tools, motion, and generated panels.",
+			Kind:        "tool",
+			Query:       "Generate a creative signal studio for " + cleanQuery,
+		},
+		{
+			ID:          slug + "-arcade",
+			Title:       titleCase(cleanQuery) + " Arcade",
+			Description: "A playful generated interface with game-like controls and visual surprises.",
 			Kind:        "generated_app",
-			Query:       "Build a dashboard for " + cleanQuery,
+			Query:       "Build an arcade-style generated page for " + cleanQuery,
 		},
 		{
 			ID:          slug + "-atlas",
-			Title:       titleCase(cleanQuery) + " Atlas",
-			Description: "A visual explorer that organizes related tools, notes, and inspirations.",
-			Kind:        "tool",
-			Query:       "Open an atlas-style explorer for " + cleanQuery,
-		},
-		{
-			ID:          slug + "-brief",
-			Title:       titleCase(cleanQuery) + " Brief",
-			Description: "A fast briefing page that converts the topic into next steps and options.",
-			Kind:        "generated_app",
-			Query:       "Generate a smart brief for " + cleanQuery,
-		},
-		{
-			ID:          slug + "-portal",
-			Title:       titleCase(cleanQuery) + " Portal",
-			Description: "A browser-like launch page for the apps and sites Morph could open next.",
+			Title:       titleCase(cleanQuery) + " Myth Atlas",
+			Description: "A beautiful explorer that maps the topic as places, artifacts, and living cards.",
 			Kind:        "website",
-			Query:       "Open a creative portal for " + cleanQuery,
+			Query:       "Open a myth-atlas creative explorer for " + cleanQuery,
 		},
+		{
+			ID:          slug + "-machine",
+			Title:       titleCase(cleanQuery) + " Machine",
+			Description: "A bold generated mini-site that turns the search into an experimental instrument.",
+			Kind:        "generated_app",
+			Query:       "Create an experimental machine interface for " + cleanQuery,
+		},
+	}
+}
+
+func practicalSuggestion(query string) suggestion {
+	cleanQuery := strings.TrimSpace(query)
+	if cleanQuery == "" {
+		cleanQuery = "new app"
+	}
+	lower := strings.ToLower(cleanQuery)
+	slug := strings.Trim(strings.ToLower(strings.ReplaceAll(cleanQuery, " ", "-")), "-")
+	if slug == "" {
+		slug = "app"
+	}
+
+	switch {
+	case strings.Contains(lower, "racing") && strings.Contains(lower, "game"):
+		return suggestion{
+			ID:          slug + "-playable",
+			Title:       "Racing Game",
+			Description: "A playable browser racing game with steering, laps, timer, and track UI.",
+			Kind:        "generated_app",
+			Query:       "Create a playable racing game",
+		}
+	case strings.Contains(lower, "game"):
+		return suggestion{
+			ID:          slug + "-game",
+			Title:       titleCase(cleanQuery),
+			Description: "A playable game interface matching the search, with controls and score.",
+			Kind:        "generated_app",
+			Query:       "Create a playable " + cleanQuery,
+		}
+	case strings.Contains(lower, "calculator"):
+		return suggestion{
+			ID:          "calculator-app",
+			Title:       "Calculator",
+			Description: "A clean working calculator with keypad, display, and basic operations.",
+			Kind:        "generated_app",
+			Query:       "Create a working calculator app",
+		}
+	case strings.Contains(lower, "todo") || strings.Contains(lower, "to-do") || strings.Contains(lower, "task"):
+		return suggestion{
+			ID:          slug + "-todo",
+			Title:       "Todo List",
+			Description: "A simple task list with add, complete, filter, and delete controls.",
+			Kind:        "generated_app",
+			Query:       "Create a working todo list app",
+		}
+	case strings.Contains(lower, "portfolio") || strings.Contains(lower, "profile") || strings.Contains(lower, "resume") || strings.Contains(lower, "social links"):
+		return suggestion{
+			ID:          slug + "-profile",
+			Title:       titleCase(cleanQuery),
+			Description: "A grounded profile or portfolio page matching the search directly.",
+			Kind:        "generated_app",
+			Query:       "Create " + cleanQuery,
+		}
+	case len(strings.Fields(cleanQuery)) >= 2 && !strings.Contains(lower, " app") && !strings.Contains(lower, "tool"):
+		return suggestion{
+			ID:          slug + "-search-page",
+			Title:       titleCase(cleanQuery),
+			Description: "A direct, grounded page for this name or phrase with concise sections.",
+			Kind:        "generated_app",
+			Query:       "Create a direct page for " + cleanQuery,
+		}
+	default:
+		return suggestion{
+			ID:          slug + "-app",
+			Title:       titleCase(cleanQuery),
+			Description: "A practical app or page that matches the search as directly as possible.",
+			Kind:        "generated_app",
+			Query:       "Create " + cleanQuery,
+		}
 	}
 }
 

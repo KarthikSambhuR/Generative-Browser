@@ -14,7 +14,8 @@
 }
 
 .app-shell {
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
     background: var(--bg);
     color: var(--text);
 }
@@ -22,7 +23,9 @@
 .workspace {
     display: grid;
     grid-template-rows: auto 2px auto 1fr;
-    min-height: 100vh;
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .tab-strip {
@@ -280,41 +283,81 @@
 
 .content {
     min-height: 0;
+    height: 100%;
     overflow-y: auto;
-    padding: 28px 24px 56px;
+    padding: 26px 30px 56px;
 }
 
 .empty-state {
     display: grid;
-    place-items: center;
-    width: min(760px, 100%);
+    align-content: start;
+    justify-items: stretch;
+    width: min(780px, 100%);
     margin: 0 auto;
-    padding-top: 22px;
-    text-align: center;
+    padding-top: 10px;
+    text-align: left;
 }
 
-.brand-name {
-    margin: 0 0 16px;
-    color: var(--muted);
+.start-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 18px;
+    padding: 14px 4px;
+    border-top: 1px solid var(--line);
+}
+
+.start-copy {
+    min-width: 0;
+}
+
+.start-copy span {
+    display: block;
+    margin-bottom: 5px;
+    color: #dfe3ea;
     font-size: 13px;
-    letter-spacing: 0;
-}
-
-.empty-state h1 {
-    margin: 0;
-    color: var(--text);
-    font-size: 42px;
     font-weight: 650;
-    letter-spacing: 0;
-    line-height: 1.1;
+    line-height: 1.3;
 }
 
-.empty-state p:last-child {
-    max-width: 430px;
-    margin: 16px 0 0;
+.start-copy p {
+    max-width: 520px;
+    margin: 0;
+    color: #8e96a3;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.mode-toggle {
+    display: inline-grid;
+    grid-template-columns: repeat(2, 1fr);
+    width: 260px;
+    margin-top: 20px;
+    padding: 3px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.mode-toggle button {
+    height: 34px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
     color: var(--muted);
-    font-size: 15px;
-    line-height: 1.6;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 650;
+    transition: background var(--transition), color var(--transition);
+}
+
+.mode-toggle button:hover {
+    color: var(--text);
+}
+
+.mode-toggle button.active {
+    background: #e8eaed;
+    color: #17191d;
 }
 
 .generated-view,
@@ -543,39 +586,86 @@
 
 .custom-page-shell {
     display: grid;
-    grid-template-rows: auto minmax(680px, 1fr);
+    grid-template-rows: auto minmax(720px, 1fr);
     gap: 12px;
-    width: min(1180px, 100%);
+    width: 100%;
     margin: 0 auto;
 }
 
-.custom-page-meta {
+.generated-browser-bar {
     display: grid;
-    gap: 4px;
-    padding: 0 4px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: #17191d;
 }
 
-.custom-page-meta span {
-    color: var(--muted);
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
+.browser-dots {
+    display: flex;
+    gap: 6px;
 }
 
-.custom-page-meta strong {
-    color: var(--text);
-    font-size: 18px;
+.browser-dots span {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #5f6368;
 }
 
-.custom-page-meta p {
-    margin: 0;
+.browser-dots span:nth-child(1) {
+    background: #ff5f56;
+}
+
+.browser-dots span:nth-child(2) {
+    background: #ffbd2e;
+}
+
+.browser-dots span:nth-child(3) {
+    background: #27c93f;
+}
+
+.generated-url-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    min-height: 34px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: #202124;
+}
+
+.lock-dot {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #71e39f;
+}
+
+.generated-url-bar strong {
+    overflow: hidden;
     color: #bdc1c6;
     font-size: 13px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.page-mode {
+    color: var(--muted);
+    font-size: 13px;
+    text-transform: uppercase;
 }
 
 .custom-page-frame {
     width: 100%;
-    min-height: 680px;
+    min-height: 720px;
     border: 1px solid var(--line);
     border-radius: 18px;
     background: #101114;
@@ -788,8 +878,13 @@
         padding-top: 24px;
     }
 
-    .empty-state h1 {
-        font-size: 32px;
+    .start-panel {
+        grid-template-columns: 1fr;
+        gap: 12px;
+    }
+
+    .mode-toggle {
+        width: 100%;
     }
 
     .result-list article {
