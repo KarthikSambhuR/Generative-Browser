@@ -1,4 +1,4 @@
-import { CSSProperties, FormEvent, KeyboardEvent, MouseEvent, UIEvent, useEffect, useMemo, useState } from 'react';
+import { CSSProperties, FormEvent, KeyboardEvent, MouseEvent, UIEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search,
     Plus,
@@ -243,6 +243,65 @@ function expandResults(suggestions: AppSuggestion[], query: string): SearchResul
     return results;
 }
 
+function parsePartialJSONSpec(stream: string): PageSpec {
+    const spec: PageSpec = {
+        title: 'Generating...',
+        sections: []
+    };
+    
+    const extractStringKey = (key: string): string | undefined => {
+        const keyPattern = new RegExp(`"${key}"\\s*:\\s*"`);
+        const match = stream.match(keyPattern);
+        if (!match || match.index === undefined) {
+            return undefined;
+        }
+        
+        const startIndex = match.index + match[0].length;
+        let result = '';
+        let escaped = false;
+        
+        for (let i = startIndex; i < stream.length; i++) {
+            const char = stream[i];
+            if (escaped) {
+                if (char === 'n') result += '\n';
+                else if (char === 't') result += '\t';
+                else if (char === 'r') result += '\r';
+                else if (char === 'b') result += '\b';
+                else if (char === 'f') result += '\f';
+                else result += char;
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                return result;
+            } else {
+                result += char;
+            }
+        }
+        return result;
+    };
+
+    const customHtml = extractStringKey('customHtml');
+    if (customHtml !== undefined) spec.customHtml = customHtml;
+    
+    const customCss = extractStringKey('customCss');
+    if (customCss !== undefined) spec.customCss = customCss;
+    
+    const customJs = extractStringKey('customJs');
+    if (customJs !== undefined) spec.customJs = customJs;
+    
+    const title = extractStringKey('title');
+    if (title !== undefined) spec.title = title;
+    
+    const subtitle = extractStringKey('subtitle');
+    if (subtitle !== undefined) spec.subtitle = subtitle;
+    
+    const mode = extractStringKey('mode');
+    if (mode !== undefined) spec.mode = mode;
+    
+    return spec;
+}
+
 function normalizePageSpec(raw: unknown, result: SearchResult): PageSpec {
     const value = raw && typeof raw === 'object' ? raw as Partial<PageSpec> : {};
     const sections = Array.isArray(value.sections) ? value.sections : fallbackPageSpec(result).sections;
@@ -370,6 +429,12 @@ function App() {
     );
     const isActiveTabLoading = activeTab.suggestionStatus === 'loading' || activeTab.pageStatus === 'loading';
     const canGoBack = activeTab.history.length > 0;
+
+    const hasIframe = useMemo(() => {
+        if (activeTab.kind !== 'generated') return false;
+        if (activeTab.pageSpec?.customHtml) return true;
+        return false;
+    }, [activeTab.kind, activeTab.pageSpec]);
 
     const searchResults = useMemo(
         () => expandResults(activeTab.suggestions, activeTab.query),
@@ -901,7 +966,7 @@ function App() {
                     </form>
                 </div>
 
-                <section className={`content ${activeTab.kind === 'generated' && activeTab.pageSpec?.customHtml ? 'iframe-mode' : ''}`} onScroll={handleContentScroll}>
+                <section className={`content ${hasIframe ? 'iframe-mode' : ''}`} onScroll={handleContentScroll}>
                     {!activeTab.query ? (
                         <div className="empty-state">
                             <div className="start-panel">
@@ -1045,10 +1110,33 @@ export default App;
 function GeneratedPageView({tab}: {tab: Tab}) {
     if (tab.pageStatus === 'loading') {
         return (
-            <div className="page-loading">
-                <Loader2 className="spin" size={18} />
-                <span>Streaming custom interface...</span>
-                <small>{tab.pageStream ? `${tab.pageStream.length.toLocaleString()} chars` : 'waiting for first chunk'}</small>
+            <div className="page-skeleton-container">
+                <div className="generated-browser-bar">
+                    <div className="browser-dots">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                    <div className="generated-url-bar">
+                        <span className="lock-dot"></span>
+                        <div className="skeleton skeleton-url"></div>
+                    </div>
+                    <span className="page-mode" style={{ color: 'var(--muted)', fontSize: '11px', fontWeight: 600 }}>
+                        {tab.pageStream ? `${tab.pageStream.length.toLocaleString()} chars` : 'connecting...'}
+                    </span>
+                </div>
+                <div className="page-skeleton-body">
+                    <div className="skeleton skeleton-hero-title" style={{ display: 'flex', alignItems: 'center', paddingLeft: '16px', color: 'rgba(255,255,255,0.4)', fontSize: '12px', fontWeight: 600 }}>
+                        Streaming components... {tab.pageStream ? `(${tab.pageStream.length.toLocaleString()} chars)` : ''}
+                    </div>
+                    <div className="skeleton skeleton-hero-desc"></div>
+                    <div className="skeleton-grid">
+                        <div className="skeleton skeleton-card"></div>
+                        <div className="skeleton skeleton-card"></div>
+                        <div className="skeleton skeleton-card"></div>
+                        <div className="skeleton skeleton-card"></div>
+                    </div>
+                </div>
             </div>
         );
     }
@@ -1065,10 +1153,10 @@ function GeneratedPageView({tab}: {tab: Tab}) {
         return null;
     }
 
-    return <GeneratedPage spec={tab.pageSpec} />;
+    return <GeneratedPage spec={tab.pageSpec} isStreaming={false} />;
 }
 
-function GeneratedPage({spec}: {spec: PageSpec}) {
+function GeneratedPage({spec, isStreaming}: {spec: PageSpec; isStreaming: boolean}) {
     const [runtime, setRuntime] = useState<Record<string, number | boolean | string | string[]>>({
         score: 0,
         focus: false,
@@ -1263,7 +1351,7 @@ function GeneratedSection({
                 <div className="runtime-panel">
                     {Object.entries(runtime).map(([key, value]) => (
                         <div key={key}>
-                            <span>{key}</span>
+                            <span>={key}</span>
                             <strong>{Array.isArray(value) ? value.length : String(value)}</strong>
                         </div>
                     ))}

@@ -420,7 +420,6 @@ func (a *App) generateFullPageFromSources(requestID string, tabID int64, title s
 	if err := scanner.Err(); err != nil {
 		return "", err
 	}
-
 	spec := extractJSONObject(content.String())
 	if spec == "" {
 		fmt.Printf("[Morph] page stream returned no JSON requestID=%s eventTypes=%v raw=%s\n", requestID, seenEventTypes, truncateForLog(content.String(), 1200))
@@ -562,7 +561,6 @@ func (a *App) tryGenerateFullPageFromSourcesCerebras(requestID string, tabID int
 	if err := scanner.Err(); err != nil {
 		return "", err
 	}
-
 	spec := extractJSONObject(content.String())
 	if spec == "" {
 		fmt.Printf("[Morph] Cerebras page stream returned no JSON requestID=%s raw=%s\n", requestID, truncateForLog(content.String(), 1200))
@@ -587,27 +585,26 @@ Web sources JSON: %s
 Rules:
 - Return one valid JSON object only. No markdown, no code fences, no prose outside JSON.
 - Schema: {"title":"string","subtitle":"string","mode":"mini_app|article|dashboard|tool|game|gallery","sourceUrl":"string","customHtml":"string","customCss":"string","customJs":"string","sections":[]}
+- All strings in the JSON, including "customHtml" and "customCss", MUST be properly escaped. Newlines inside HTML or CSS strings must be written as '\n', not as literal unescaped newlines.
 - customHtml is a body fragment only. Do not include html/head/body/style/script tags.
 - customCss is complete CSS. Use @import for Google Fonts when useful.
 - In sourced mode: use no JavaScript unless the query is a simple working tool like calculator, todo, notes, timer, converter, or checklist. For normal informational sourced searches, customJs should be an empty string.
-- In sourced mode: enforce a really minimal and clean design. Focus on a simple, elegant layout with lightweight typography, lots of whitespace, and minimal distractions. Do not use busy backgrounds or heavy border radius/shadows.
+- In sourced mode: Enforce a bold, highly informational, and modern premium design. Use vibrant accents, elegant typography, clean grid structures, and clear content blocks. Make it feel like a fully realized, actual website where users can get rich, detailed information. Do not use plain text blocks or empty screens.
 - In creative mode: JavaScript is allowed when it makes the generated page more alive or functional.
-- If sourced mode gets an informational/real topic, use the web sources as the factual basis and cite them visibly in the page.
+- If sourced mode gets an informational/real topic, use the web sources as the factual basis and cite them visibly and beautifully in the page.
 - Include a polished Sources section in customHtml with links to the provided source URLs when sources are provided.
 - If a source has an image URL, use it as a visual asset with alt text and nearby attribution.
 - Use lucide-style inline SVG icons where icons help. Do not load icon libraries.
 - Use modern design standards: responsive layout, strong typography, accessible contrast, stable spacing, polished controls, and no browser-default-looking UI.
-- If sourced mode receives a complex app/game request that cannot be built well as simple HTML/CSS, generate a beautiful explanation page saying this is better for Creative Search and why.
-- If sourced mode receives a simple tool request, generate the full working tool and use JS only for that tool.
 - If creative mode receives an app/tool/game request, generate the full functional UI from this single request.
 - Match the user's intent directly first; add creativity only after the direct result is solved.`, title, description, query, mode, string(sourceJSON))
 }
 
 func fullPageInstructions(mode string) string {
 	if mode == "sourced" {
-		return "You are Morph's sourced-search page generator. Create one accurate, beautiful HTML/CSS page from provided web sources with a really minimal and clean design. Keep the layout simple, typography elegant, whitespace generous, and avoid unnecessary decorations or complex layouts. Use customJs only for simple tools that need interaction. Cite sources visibly. For complex games/apps, politely route the user to Creative Search. Return only one JSON object."
+		return "You are Morph's sourced-search page generator. Create one accurate, beautifully structured, bold, and informational HTML/CSS website from provided web sources. Enforce a premium, modern design with rich typography, clean grids, and prominent information display. Cite sources and factual information clearly. Return only one JSON object."
 	}
-	return "You are Morph's creative-search page generator. Create one coherent, imaginative, polished generated page as JSON containing customHtml, customCss, and customJs. Do not use web citations unless they are provided. Return only one JSON object."
+	return "You are Morph's creative-search page generator. Create one coherent, imaginative, bold, and polished generated page as JSON containing customHtml, customCss, and customJs. Return only one JSON object."
 }
 
 func queryForWebSearch(title string, description string, query string) string {
@@ -1758,7 +1755,46 @@ func normalizeCacheKey(key string) string {
 	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(key))), " ")
 }
 
+func sanitizeJSON(input string) string {
+	var result strings.Builder
+	inString := false
+	escaped := false
+	for i := 0; i < len(input); i++ {
+		char := input[i]
+		if escaped {
+			result.WriteByte(char)
+			escaped = false
+			continue
+		}
+		if char == '\\' && inString {
+			result.WriteByte(char)
+			escaped = true
+			continue
+		}
+		if char == '"' {
+			inString = !inString
+			result.WriteByte(char)
+			continue
+		}
+		if inString {
+			if char == '\n' {
+				result.WriteString("\\n")
+			} else if char == '\r' {
+				result.WriteString("\\r")
+			} else if char == '\t' {
+				result.WriteString("\\t")
+			} else {
+				result.WriteByte(char)
+			}
+		} else {
+			result.WriteByte(char)
+		}
+	}
+	return result.String()
+}
+
 func extractJSONObject(content string) string {
+	content = sanitizeJSON(content)
 	start := strings.Index(content, "{")
 	if start == -1 {
 		return ""
