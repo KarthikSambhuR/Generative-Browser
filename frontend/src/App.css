@@ -899,3 +899,24 @@
         grid-column: span 12;
     }
 }
+
+.content.iframe-mode {
+    overflow: hidden !important;
+    padding: 16px 20px 20px !important;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.content.iframe-mode .custom-page-shell {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.content.iframe-mode .custom-page-frame {
+    flex: 1;
+    min-height: 0 !important;
+    height: 100% !important;
+}

@@ -140,7 +140,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 // SearchSuggestions starts a streamed LLM request for app and website suggestions.
-func (a *App) SearchSuggestions(query string, tabID int64, requestID string) (string, error) {
+func (a *App) SearchSuggestions(query string, tabID int64, requestID string, generationMode string) (string, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return "", errors.New("query is required")
@@ -156,14 +156,27 @@ func (a *App) SearchSuggestions(query string, tabID int64, requestID string) (st
 		return requestID, nil
 	}
 
-	apiKey := readEnvValue("OPENAI_API_KEY")
-	if apiKey == "" {
-		err := errors.New("OPENAI_API_KEY is missing; add it to .env or your shell environment")
-		logRequestProblem(requestID, query, err)
-		return "", err
+	var apiKey string
+	if generationMode == "superfast" {
+		apiKey = readEnvValue("CEREBRAS_API_KEY")
+		if apiKey == "" {
+			apiKey = readEnvValue("CEREBRUS_API_KEY")
+		}
+		if apiKey == "" {
+			err := errors.New("CEREBRAS_API_KEY or CEREBRUS_API_KEY is missing; add it to .env or your shell environment")
+			logRequestProblem(requestID, query, err)
+			return "", err
+		}
+	} else {
+		apiKey = readEnvValue("OPENAI_API_KEY")
+		if apiKey == "" {
+			err := errors.New("OPENAI_API_KEY is missing; add it to .env or your shell environment")
+			logRequestProblem(requestID, query, err)
+			return "", err
+		}
 	}
 
-	go a.streamSuggestions(requestID, tabID, query, apiKey)
+	go a.streamSuggestions(requestID, tabID, query, apiKey, generationMode)
 
 	return requestID, nil
 }
@@ -188,7 +201,7 @@ func (a *App) emitCachedSuggestions(requestID string, tabID int64, query string,
 }
 
 // GeneratePageStream streams a creative custom page JSON spec for a clicked result.
-func (a *App) GeneratePageStream(title string, description string, query string, tabID int64, requestID string) (string, error) {
+func (a *App) GeneratePageStream(title string, description string, query string, tabID int64, requestID string, generationMode string) (string, error) {
 	title = strings.TrimSpace(title)
 	description = strings.TrimSpace(description)
 	query = strings.TrimSpace(query)
@@ -219,20 +232,39 @@ func (a *App) GeneratePageStream(title string, description string, query string,
 		return requestID, nil
 	}
 
-	apiKey := readEnvValue("OPENAI_API_KEY")
-	if apiKey == "" {
-		err := errors.New("OPENAI_API_KEY is missing; add it to .env or your shell environment")
-		logRequestProblem(requestID, query, err)
-		a.emitPage("page:done", pageEvent{
-			RequestID: requestID,
-			TabID:     tabID,
-			Title:     title,
-			Spec:      fallbackPageJSON(title, description, query),
-		})
-		return requestID, nil
+	var apiKey string
+	if generationMode == "superfast" {
+		apiKey = readEnvValue("CEREBRAS_API_KEY")
+		if apiKey == "" {
+			apiKey = readEnvValue("CEREBRUS_API_KEY")
+		}
+		if apiKey == "" {
+			err := errors.New("CEREBRAS_API_KEY or CEREBRUS_API_KEY is missing; add it to .env or your shell environment")
+			logRequestProblem(requestID, query, err)
+			a.emitPage("page:done", pageEvent{
+				RequestID: requestID,
+				TabID:     tabID,
+				Title:     title,
+				Spec:      fallbackPageJSON(title, description, query),
+			})
+			return requestID, nil
+		}
+	} else {
+		apiKey = readEnvValue("OPENAI_API_KEY")
+		if apiKey == "" {
+			err := errors.New("OPENAI_API_KEY is missing; add it to .env or your shell environment")
+			logRequestProblem(requestID, query, err)
+			a.emitPage("page:done", pageEvent{
+				RequestID: requestID,
+				TabID:     tabID,
+				Title:     title,
+				Spec:      fallbackPageJSON(title, description, query),
+			})
+			return requestID, nil
+		}
 	}
 
-	go a.streamPage(requestID, tabID, title, description, query, mode, apiKey)
+	go a.streamPage(requestID, tabID, title, description, query, mode, apiKey, generationMode)
 	return requestID, nil
 }
 
@@ -255,8 +287,8 @@ func pageModeQuery(mode string, query string) string {
 	return creativeQueryPrefix + "\n" + query
 }
 
-func (a *App) streamPage(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string) {
-	fmt.Printf("[Morph] page stream started requestID=%s tabID=%d mode=%s title=%q query=%q provider=openai model=%s\n", requestID, tabID, mode, title, query, pageGenerationModel)
+func (a *App) streamPage(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, generationMode string) {
+	fmt.Printf("[Morph] page stream started requestID=%s tabID=%d mode=%s title=%q query=%q provider=openai model=%s generationMode=%s\n", requestID, tabID, mode, title, query, pageGenerationModel, generationMode)
 	a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
 
 	sources := []webSource{}
@@ -272,7 +304,7 @@ func (a *App) streamPage(requestID string, tabID int64, title string, descriptio
 		}
 	}
 
-	spec, err := a.generateFullPageFromSources(requestID, tabID, title, description, query, mode, apiKey, sources)
+	spec, err := a.generateFullPageFromSources(requestID, tabID, title, description, query, mode, apiKey, sources, generationMode)
 	if err != nil {
 		a.emitPageError(requestID, tabID, title, query, err)
 		return
@@ -292,7 +324,12 @@ func (a *App) streamPage(requestID string, tabID int64, title string, descriptio
 	})
 }
 
-func (a *App) generateFullPageFromSources(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource) (string, error) {
+
+func (a *App) generateFullPageFromSources(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource, generationMode string) (string, error) {
+	if generationMode == "superfast" {
+		return a.generateFullPageFromSourcesCerebras(requestID, tabID, title, description, query, mode, apiKey, sources)
+	}
+
 	body := responsesRequest{
 		Model:           pageGenerationModel,
 		Instructions:    fullPageInstructions(mode),
@@ -392,6 +429,148 @@ func (a *App) generateFullPageFromSources(requestID string, tabID int64, title s
 	return spec, nil
 }
 
+type cerebrasMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type cerebrasRequest struct {
+	Model       string            `json:"model"`
+	Messages    []cerebrasMessage `json:"messages"`
+	Stream      bool              `json:"stream"`
+	MaxTokens   int               `json:"max_tokens,omitempty"`
+	Temperature float64           `json:"temperature,omitempty"`
+	TopP        float64           `json:"top_p,omitempty"`
+}
+
+type cerebrasStreamResponse struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
+}
+
+func (a *App) generateFullPageFromSourcesCerebras(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource) (string, error) {
+	maxRetries := 10
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			fmt.Printf("[Morph] Retrying generateFullPageFromSourcesCerebras, attempt %d/%d...\n", attempt, maxRetries)
+			// Emit page:started to clear/reset the stream state in the frontend
+			a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
+			time.Sleep(1 * time.Second)
+		}
+
+		spec, err := a.tryGenerateFullPageFromSourcesCerebras(requestID, tabID, title, description, query, mode, apiKey, sources)
+		if err == nil && spec != "" {
+			return spec, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("empty page spec generated")
+		}
+	}
+
+	return "", fmt.Errorf("failed page generation after %d attempts: %v", maxRetries, lastErr)
+}
+
+func (a *App) tryGenerateFullPageFromSourcesCerebras(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource) (string, error) {
+	fmt.Printf("[Morph] tryGenerateFullPageFromSourcesCerebras started requestID=%s tabID=%d mode=%s title=%q query=%q\n", requestID, tabID, mode, title, query)
+	systemPrompt := fullPageInstructions(mode)
+	input := pageGenerationBrief(title, description, query, mode, sources)
+
+	body := cerebrasRequest{
+		Model: "zai-glm-4.7",
+		Messages: []cerebrasMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: input},
+		},
+		Stream:      true,
+		MaxTokens:   65000,
+		Temperature: 1,
+		TopP:        0.95,
+	}
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+
+	apiURL := readEnvValue("CEREBRAS_API_URL")
+	if apiURL == "" {
+		apiURL = readEnvValue("CEREBRUS_API_URL")
+	}
+	if apiURL == "" {
+		apiURL = "https://api.cerebras.ai/v1/chat/completions"
+	}
+
+	req, err := http.NewRequestWithContext(a.ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer " + apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 150 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("Cerebras page stream returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+
+	content := strings.Builder{}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 8*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == "data: [DONE]" {
+			break
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		var event cerebrasStreamResponse
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		if len(event.Choices) > 0 {
+			textDelta := event.Choices[0].Delta.Content
+			if textDelta != "" {
+				content.WriteString(textDelta)
+				a.emitPage("page:chunk", pageEvent{
+					RequestID: requestID,
+					TabID:     tabID,
+					Title:     title,
+					Chunk:     textDelta,
+				})
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+
+	spec := extractJSONObject(content.String())
+	if spec == "" {
+		fmt.Printf("[Morph] Cerebras page stream returned no JSON requestID=%s raw=%s\n", requestID, truncateForLog(content.String(), 1200))
+		return "", fmt.Errorf("page generation returned no JSON")
+	}
+	return spec, nil
+}
+
 func pageGenerationBrief(title string, description string, query string, mode string, sources []webSource) string {
 	sourceJSON, err := json.MarshalIndent(sources, "", "  ")
 	if err != nil {
@@ -411,6 +590,7 @@ Rules:
 - customHtml is a body fragment only. Do not include html/head/body/style/script tags.
 - customCss is complete CSS. Use @import for Google Fonts when useful.
 - In sourced mode: use no JavaScript unless the query is a simple working tool like calculator, todo, notes, timer, converter, or checklist. For normal informational sourced searches, customJs should be an empty string.
+- In sourced mode: enforce a really minimal and clean design. Focus on a simple, elegant layout with lightweight typography, lots of whitespace, and minimal distractions. Do not use busy backgrounds or heavy border radius/shadows.
 - In creative mode: JavaScript is allowed when it makes the generated page more alive or functional.
 - If sourced mode gets an informational/real topic, use the web sources as the factual basis and cite them visibly in the page.
 - Include a polished Sources section in customHtml with links to the provided source URLs when sources are provided.
@@ -425,7 +605,7 @@ Rules:
 
 func fullPageInstructions(mode string) string {
 	if mode == "sourced" {
-		return "You are Morph's sourced-search page generator. Create one accurate, beautiful HTML/CSS page from provided web sources. Use customJs only for simple tools that need interaction. Cite sources visibly. For complex games/apps, politely route the user to Creative Search. Return only one JSON object."
+		return "You are Morph's sourced-search page generator. Create one accurate, beautiful HTML/CSS page from provided web sources with a really minimal and clean design. Keep the layout simple, typography elegant, whitespace generous, and avoid unnecessary decorations or complex layouts. Use customJs only for simple tools that need interaction. Cite sources visibly. For complex games/apps, politely route the user to Creative Search. Return only one JSON object."
 	}
 	return "You are Morph's creative-search page generator. Create one coherent, imaginative, polished generated page as JSON containing customHtml, customCss, and customJs. Do not use web citations unless they are provided. Return only one JSON object."
 }
@@ -770,7 +950,7 @@ func (a *App) emitPageError(requestID string, tabID int64, title string, query s
 }
 
 // GeneratePage returns a JSON page spec that the frontend can render safely.
-func (a *App) GeneratePage(title string, description string, query string) (string, error) {
+func (a *App) GeneratePage(title string, description string, query string, generationMode string) (string, error) {
 	title = strings.TrimSpace(title)
 	description = strings.TrimSpace(description)
 	query = strings.TrimSpace(query)
@@ -851,7 +1031,166 @@ func (a *App) GeneratePage(title string, description string, query string) (stri
 	return spec, nil
 }
 
-func (a *App) streamSuggestions(requestID string, tabID int64, query string, apiKey string) {
+func (a *App) streamSuggestionsCerebras(requestID string, tabID int64, query string, apiKey string) {
+	maxRetries := 10
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			fmt.Printf("[Morph] Retrying streamSuggestionsCerebras, attempt %d/%d...\n", attempt, maxRetries)
+			// Emit suggestions:started to clear/reset suggestions state in frontend
+			a.emit("suggestions:started", suggestionEvent{
+				RequestID: requestID,
+				TabID:     tabID,
+				Query:     query,
+			})
+			time.Sleep(1 * time.Second)
+		}
+
+		err := a.tryStreamSuggestionsCerebras(requestID, tabID, query, apiKey)
+		if err == nil {
+			return
+		}
+		lastErr = err
+	}
+
+	a.emitSuggestionError(requestID, tabID, query, fmt.Errorf("failed suggestions after %d attempts: %v", maxRetries, lastErr))
+}
+
+func (a *App) tryStreamSuggestionsCerebras(requestID string, tabID int64, query string, apiKey string) error {
+	fmt.Printf("[Morph] tryStreamSuggestionsCerebras started requestID=%s tabID=%d query=%q\n", requestID, tabID, query)
+
+	body := cerebrasRequest{
+		Model: "zai-glm-4.7",
+		Messages: []cerebrasMessage{
+			{Role: "system", Content: "You are Morph's Creative Search suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"Creative app or website title\",\"description\":\"One vivid short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to generate\"}]}. Return exactly 5 suggestions in one JSON object. Every result can be imaginative. Do not rank by practicality. Keep each result connected to the user's search, but give each one a distinct creative angle, interface idea, or generated experience."},
+			{Role: "user", Content: fmt.Sprintf("User searched in Creative Search: %q. Suggest 5 creative generated app or website results.", query)},
+		},
+		Stream:      true,
+		MaxTokens:   65000,
+		Temperature: 1,
+		TopP:        0.95,
+	}
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	apiURL := readEnvValue("CEREBRAS_API_URL")
+	if apiURL == "" {
+		apiURL = readEnvValue("CEREBRUS_API_URL")
+	}
+	if apiURL == "" {
+		apiURL = "https://api.cerebras.ai/v1/chat/completions"
+	}
+
+	req, err := http.NewRequestWithContext(a.ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer " + apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("Cerebras API returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+
+	content := strings.Builder{}
+	emitted := map[string]bool{}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 8*1024*1024)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == "data: [DONE]" {
+			break
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		var event cerebrasStreamResponse
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		if len(event.Choices) > 0 {
+			textDelta := event.Choices[0].Delta.Content
+			if textDelta != "" {
+				content.WriteString(textDelta)
+				for _, item := range extractSuggestions(content.String()) {
+					if len(emitted) >= maxSuggestions {
+						break
+					}
+					key := item.ID
+					if key == "" {
+						key = strings.ToLower(item.Title)
+					}
+					if key == "" || emitted[key] {
+						continue
+					}
+					emitted[key] = true
+					copied := item
+					a.emit("suggestions:item", suggestionEvent{
+						RequestID: requestID,
+						TabID:     tabID,
+						Query:     query,
+						Item:      &copied,
+					})
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	items := extractSuggestions(content.String())
+	items = ensureFiveSuggestions(query, items)
+	if err := writeSuggestionsCache(query, items); err != nil {
+		fmt.Printf("[Morph] suggestions cache write failed requestID=%s error=%v\n", requestID, err)
+	}
+	for _, item := range items {
+		key := suggestionKey(item)
+		if key == "" || emitted[key] {
+			continue
+		}
+		emitted[key] = true
+		copied := item
+		a.emit("suggestions:item", suggestionEvent{
+			RequestID: requestID,
+			TabID:     tabID,
+			Query:     query,
+			Item:      &copied,
+		})
+	}
+	a.emit("suggestions:done", suggestionEvent{
+		RequestID: requestID,
+		TabID:     tabID,
+		Query:     query,
+		Items:     items,
+	})
+	return nil
+}
+
+func (a *App) streamSuggestions(requestID string, tabID int64, query string, apiKey string, generationMode string) {
+	if generationMode == "superfast" {
+		a.streamSuggestionsCerebras(requestID, tabID, query, apiKey)
+		return
+	}
+
 	fmt.Printf("[Morph] suggestions request started requestID=%s tabID=%d query=%q provider=openai model=%s\n", requestID, tabID, query, suggestionModel)
 
 	a.emit("suggestions:started", suggestionEvent{

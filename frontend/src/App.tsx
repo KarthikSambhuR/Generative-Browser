@@ -17,6 +17,7 @@ import {ClipboardSetText, EventsOn, Quit, WindowMinimise, WindowToggleMaximise} 
 
 type TabKind = 'search' | 'generated';
 type SearchMode = 'sourced' | 'creative';
+type GenerationMode = 'standard' | 'superfast';
 type SuggestionStatus = 'idle' | 'loading' | 'done' | 'error';
 type PageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -52,6 +53,7 @@ type Tab = {
     query: string;
     kind: TabKind;
     searchMode: SearchMode;
+    generationMode: GenerationMode;
     createdAt: string;
     suggestions: AppSuggestion[];
     suggestionStatus: SuggestionStatus;
@@ -120,6 +122,7 @@ type TabHistoryEntry = {
     query: string;
     kind: TabKind;
     searchMode: SearchMode;
+    generationMode: GenerationMode;
     suggestions: AppSuggestion[];
     suggestionStatus: SuggestionStatus;
     suggestionError?: string;
@@ -143,6 +146,7 @@ const starterTabs: Tab[] = [
         query: '',
         kind: 'search',
         searchMode: 'sourced',
+        generationMode: 'standard',
         createdAt: 'Just now',
         suggestions: [],
         suggestionStatus: 'idle',
@@ -342,6 +346,7 @@ function tabToHistoryEntry(tab: Tab): TabHistoryEntry {
         query: tab.query,
         kind: tab.kind,
         searchMode: tab.searchMode,
+        generationMode: tab.generationMode,
         suggestions: tab.suggestions,
         suggestionStatus: tab.suggestionStatus,
         suggestionError: tab.suggestionError,
@@ -381,6 +386,7 @@ function App() {
             query: '',
             kind: 'search',
             searchMode: activeTab?.searchMode || 'sourced',
+            generationMode: activeTab?.generationMode || 'standard',
             createdAt: 'Just now',
             suggestions: [],
             suggestionStatus: 'idle',
@@ -430,7 +436,10 @@ function App() {
         }
 
         const requestId = newRequestID();
-        const selectedMode = tabs.find((tab) => tab.id === tabId)?.searchMode || 'sourced';
+        const tab = tabs.find((t) => t.id === tabId);
+        const selectedMode = tab?.searchMode || 'sourced';
+        const generationMode = tab?.generationMode || 'standard';
+
         if (selectedMode === 'sourced') {
             const result: SearchResult = {
                 id: `sourced-${slugify(trimmedQuery)}`,
@@ -445,11 +454,11 @@ function App() {
         }
 
         setTabs((currentTabs) =>
-            currentTabs.map((tab) =>
-                tab.id === tabId
+            currentTabs.map((t) =>
+                t.id === tabId
                     ? {
-                        ...tab,
-                        history: [...tab.history, tabToHistoryEntry(tab)],
+                        ...t,
+                        history: [...t.history, tabToHistoryEntry(t)],
                         title: titleFromQuery(trimmedQuery),
                         query: trimmedQuery,
                         kind: 'search',
@@ -463,20 +472,20 @@ function App() {
                         pageSpec: undefined,
                         pageError: undefined,
                     }
-                    : tab,
+                    : t,
             ),
         );
 
-        SearchSuggestions(trimmedQuery, tabId, requestId).catch((error) => {
+        SearchSuggestions(trimmedQuery, tabId, requestId, generationMode).catch((error) => {
             setTabs((currentTabs) =>
-                currentTabs.map((tab) =>
-                    tab.id === tabId && tab.requestId === requestId
+                currentTabs.map((t) =>
+                    t.id === tabId && t.requestId === requestId
                         ? {
-                            ...tab,
+                            ...t,
                             suggestionStatus: 'error',
                             suggestionError: error instanceof Error ? error.message : String(error),
                         }
-                        : tab,
+                        : t,
                 ),
             );
         });
@@ -484,12 +493,15 @@ function App() {
 
     function loadPageInTab(tabId: number, result: SearchResult, pushHistory = true, mode: SearchMode = 'creative') {
         const requestId = newRequestID();
+        const tab = tabs.find((t) => t.id === tabId);
+        const generationMode = tab?.generationMode || 'standard';
+
         setTabs((currentTabs) =>
-            currentTabs.map((tab) =>
-                tab.id === tabId
+            currentTabs.map((t) =>
+                t.id === tabId
                     ? {
-                        ...tab,
-                        history: pushHistory ? [...tab.history, tabToHistoryEntry(tab)] : tab.history,
+                        ...t,
+                        history: pushHistory ? [...t.history, tabToHistoryEntry(t)] : t.history,
                         title: titleFromQuery(result.title),
                         query: result.query,
                         kind: 'generated',
@@ -500,22 +512,22 @@ function App() {
                         pageError: undefined,
                         pageStream: '',
                     }
-                    : tab,
+                    : t,
             ),
         );
 
-        GeneratePageStream(result.title, result.description, pageModeQuery(mode, result.query), tabId, requestId)
+        GeneratePageStream(result.title, result.description, pageModeQuery(mode, result.query), tabId, requestId, generationMode)
             .catch((error) => {
                 setTabs((currentTabs) =>
-                    currentTabs.map((tab) =>
-                        tab.id === tabId && tab.requestId === requestId
+                    currentTabs.map((t) =>
+                        t.id === tabId && t.requestId === requestId
                             ? {
-                                ...tab,
+                                ...t,
                                 pageStatus: 'error',
                                 pageError: error instanceof Error ? error.message : String(error),
                                 pageSpec: fallbackPageSpec(result),
                             }
-                            : tab,
+                            : t,
                     ),
                 );
             });
@@ -537,6 +549,7 @@ function App() {
             query: result.query,
             kind: 'generated',
             searchMode: activeTab.searchMode === 'sourced' ? 'sourced' : 'creative',
+            generationMode: activeTab.generationMode || 'standard',
             createdAt: 'Just now',
             suggestions: [],
             suggestionStatus: 'idle',
@@ -561,6 +574,19 @@ function App() {
                         ...tab,
                         searchMode: mode,
                         suggestionStatus: tab.query ? tab.suggestionStatus : 'idle',
+                    }
+                    : tab,
+            ),
+        );
+    }
+
+    function setGenerationMode(mode: GenerationMode) {
+        setTabs((currentTabs) =>
+            currentTabs.map((tab) =>
+                tab.id === activeTabId
+                    ? {
+                        ...tab,
+                        generationMode: mode,
                     }
                     : tab,
             ),
@@ -628,7 +654,7 @@ function App() {
             setTabs((currentTabs) =>
                 currentTabs.map((tab) =>
                     tab.id === event.tabId && tab.requestId === event.requestId
-                        ? {...tab, suggestionStatus: 'loading', suggestionError: undefined}
+                        ? {...tab, suggestionStatus: 'loading', suggestionError: undefined, suggestions: []}
                         : tab,
                 ),
             );
@@ -686,6 +712,19 @@ function App() {
 
                     return {...tab, suggestions: merged.slice(0, maxSuggestions), suggestionStatus: 'done'};
                 }),
+            );
+        });
+
+        const offPageStarted = EventsOn('page:started', (event: PageEvent) => {
+            setTabs((currentTabs) =>
+                currentTabs.map((tab) =>
+                    tab.id === event.tabId && tab.requestId === event.requestId
+                        ? {
+                            ...tab,
+                            pageStream: '',
+                        }
+                        : tab,
+                ),
             );
         });
 
@@ -755,6 +794,7 @@ function App() {
             offItem();
             offError();
             offDone();
+            offPageStarted();
             offPageChunk();
             offPageDone();
             offPageError();
@@ -861,7 +901,7 @@ function App() {
                     </form>
                 </div>
 
-                <section className="content" onScroll={handleContentScroll}>
+                <section className={`content ${activeTab.kind === 'generated' && activeTab.pageSpec?.customHtml ? 'iframe-mode' : ''}`} onScroll={handleContentScroll}>
                     {!activeTab.query ? (
                         <div className="empty-state">
                             <div className="start-panel">
@@ -887,6 +927,31 @@ function App() {
                                         type="button"
                                     >
                                         Creative
+                                    </button>
+                                </div>
+
+                                <div className="start-copy" style={{ marginTop: '24px' }}>
+                                    <span>Generation speed</span>
+                                    <p>
+                                        {activeTab.generationMode === 'superfast'
+                                            ? 'Uses Cerebras AI API (GLM 4) for blazing fast generated pages.'
+                                            : 'Uses OpenAI GPT models for high-quality results.'}
+                                    </p>
+                                </div>
+                                <div className="mode-toggle" role="group" aria-label="Generation speed">
+                                    <button
+                                        className={activeTab.generationMode === 'standard' ? 'active' : ''}
+                                        onClick={() => setGenerationMode('standard')}
+                                        type="button"
+                                    >
+                                        Standard
+                                    </button>
+                                    <button
+                                        className={activeTab.generationMode === 'superfast' ? 'active' : ''}
+                                        onClick={() => setGenerationMode('superfast')}
+                                        type="button"
+                                    >
+                                        Super Fast
                                     </button>
                                 </div>
                             </div>
