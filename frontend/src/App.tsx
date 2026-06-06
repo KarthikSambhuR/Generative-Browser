@@ -1,4 +1,18 @@
-import {FormEvent, useMemo, useState} from 'react';
+import { FormEvent, useMemo, useState } from 'react';
+import {
+    Command,
+    Search,
+    Library,
+    Settings,
+    Plus,
+    X,
+    Sparkles,
+    ArrowRight,
+    Cpu,
+    GitBranch,
+    FileCode,
+    ExternalLink
+} from 'lucide-react';
 import './App.css';
 
 type TabKind = 'search' | 'generated';
@@ -47,6 +61,7 @@ function App() {
     const [tabs, setTabs] = useState<Tab[]>(starterTabs);
     const [activeTabId, setActiveTabId] = useState(1);
     const [command, setCommand] = useState('');
+    const [activeMenu, setActiveMenu] = useState<'workspace' | 'library' | 'settings'>('workspace');
 
     const activeTab = useMemo(
         () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -117,10 +132,30 @@ function App() {
     return (
         <main className="app-shell">
             <aside className="rail">
-                <div className="brand-mark">M</div>
-                <button className="rail-button active" title="Workspace">⌘</button>
-                <button className="rail-button" title="Library">□</button>
-                <button className="rail-button" title="Settings">⚙</button>
+                <div className="brand-mark" title="Morph">
+                    <Command size={22} strokeWidth={2.5} />
+                </div>
+                <button
+                    className={`rail-button ${activeMenu === 'workspace' ? 'active' : ''}`}
+                    onClick={() => setActiveMenu('workspace')}
+                    title="Workspace"
+                >
+                    <Search size={20} />
+                </button>
+                <button
+                    className={`rail-button ${activeMenu === 'library' ? 'active' : ''}`}
+                    onClick={() => setActiveMenu('library')}
+                    title="Library"
+                >
+                    <Library size={20} />
+                </button>
+                <button
+                    className={`rail-button ${activeMenu === 'settings' ? 'active' : ''}`}
+                    onClick={() => setActiveMenu('settings')}
+                    title="Settings"
+                >
+                    <Settings size={20} />
+                </button>
             </aside>
 
             <section className="workspace">
@@ -143,25 +178,29 @@ function App() {
                                     }}
                                     title="Close tab"
                                 >
-                                    ×
+                                    <X size={12} strokeWidth={2.5} />
                                 </span>
                             </button>
                         ))}
                     </div>
                     <button className="new-tab" onClick={addTab} title="New tab" type="button">
-                        +
+                        <Plus size={16} strokeWidth={2.5} />
                     </button>
                 </div>
 
                 <form className="command-bar" onSubmit={submitSearch}>
-                    <span className="search-icon">⌕</span>
+                    <span className="search-icon">
+                        <Search size={18} strokeWidth={2} />
+                    </span>
                     <input
                         autoFocus
                         onChange={(event) => setCommand(event.target.value)}
                         placeholder="Search the web, open a site, or generate an app..."
                         value={command}
                     />
-                    <button type="submit">Go</button>
+                    <button type="submit">
+                        Go <ArrowRight size={14} strokeWidth={2.5} />
+                    </button>
                 </form>
 
                 <section className="content">
@@ -194,17 +233,23 @@ function App() {
 
                             <div className="preview-grid">
                                 <article>
-                                    <span>1</span>
+                                    <span>
+                                        <GitBranch size={18} />
+                                    </span>
                                     <h2>Intent router</h2>
                                     <p>Classifies the prompt as app generation, site navigation, or search.</p>
                                 </article>
                                 <article>
-                                    <span>2</span>
+                                    <span>
+                                        <Cpu size={18} />
+                                    </span>
                                     <h2>Schema output</h2>
                                     <p>Receives screens, components, theme tokens, actions, and image requests.</p>
                                 </article>
                                 <article>
-                                    <span>3</span>
+                                    <span>
+                                        <FileCode size={18} />
+                                    </span>
                                     <h2>Renderer</h2>
                                     <p>Maps validated JSON to reusable React components inside this tab.</p>
                                 </article>
@@ -225,7 +270,9 @@ function App() {
                                                 search API or route URLs into an embedded browser view.
                                             </p>
                                         </div>
-                                        <button type="button">Open</button>
+                                        <button type="button">
+                                            Open <ExternalLink size={12} />
+                                        </button>
                                     </article>
                                 ))}
                             </div>
