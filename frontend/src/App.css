@@ -330,8 +330,11 @@
 
 .mode-toggle {
     display: inline-grid;
-    grid-template-columns: repeat(2, 1fr);
-    width: 260px;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    min-width: 260px;
+    width: max-content;
+    max-width: 100%;
     margin-top: 20px;
     padding: 3px;
     border: 1px solid var(--line);
@@ -341,6 +344,7 @@
 
 .mode-toggle button {
     height: 34px;
+    padding: 0 16px;
     border: 0;
     border-radius: 999px;
     background: transparent;
@@ -348,6 +352,7 @@
     cursor: pointer;
     font-size: 13px;
     font-weight: 650;
+    white-space: nowrap;
     transition: background var(--transition), color var(--transition);
 }
 
@@ -997,6 +1002,52 @@
     .skeleton-card {
         grid-column: span 12;
     }
+}
+
+/* Logo Styling */
+.app-logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-right: 4px;
+    --wails-draggable: no-drag;
+}
+
+.app-logo-img {
+    height: 20px;
+    width: auto;
+    object-fit: contain;
+}
+
+.empty-state-logo-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 28px;
+    text-align: center;
+}
+
+.large-app-logo {
+    height: 72px;
+    width: auto;
+    object-fit: contain;
+    margin-bottom: 16px;
+    filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.3));
+}
+
+.empty-state-logo-container h1 {
+    font-size: 32px;
+    font-weight: 700;
+    margin: 0 0 6px;
+    color: var(--text);
+    letter-spacing: -0.5px;
+}
+
+.empty-state-logo-container .subtitle {
+    font-size: 15px;
+    color: var(--muted);
+    margin: 0;
 }
 
 

@@ -24,6 +24,8 @@ import (
 )
 
 const openAIResponsesURL = "https://api.openai.com/v1/responses"
+const geminiGenerateContentURLTemplate = "https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?key=%s"
+const geminiSlowModel = "gemma-4-31b-it"
 const suggestionModel = "gpt-5.4-nano"
 const pageGenerationModel = "gpt-5.4-nano"
 const maxSuggestions = 5
@@ -65,9 +67,9 @@ type pageEvent struct {
 
 type responsesRequest struct {
 	Model           string           `json:"model"`
-	Instructions    string           `json:"instructions"`
-	Input           string           `json:"input"`
-	MaxOutputTokens int              `json:"max_output_tokens"`
+	Instructions    string           `json:"instructions,omitempty"`
+	Input           interface{}      `json:"input"`
+	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
 	Stream          bool             `json:"stream"`
 	Reasoning       *reasoningConfig `json:"reasoning,omitempty"`
 	Text            *textConfig      `json:"text,omitempty"`
@@ -167,6 +169,13 @@ func (a *App) SearchSuggestions(query string, tabID int64, requestID string, gen
 			logRequestProblem(requestID, query, err)
 			return "", err
 		}
+	} else if generationMode == "slow" {
+		apiKey = readEnvValue("GEMINI_API_KEY")
+		if apiKey == "" {
+			err := errors.New("GEMINI_API_KEY is missing; add it to .env or your shell environment")
+			logRequestProblem(requestID, query, err)
+			return "", err
+		}
 	} else {
 		apiKey = readEnvValue("OPENAI_API_KEY")
 		if apiKey == "" {
@@ -249,6 +258,19 @@ func (a *App) GeneratePageStream(title string, description string, query string,
 			})
 			return requestID, nil
 		}
+	} else if generationMode == "slow" {
+		apiKey = readEnvValue("GEMINI_API_KEY")
+		if apiKey == "" {
+			err := errors.New("GEMINI_API_KEY is missing; add it to .env or your shell environment")
+			logRequestProblem(requestID, query, err)
+			a.emitPage("page:done", pageEvent{
+				RequestID: requestID,
+				TabID:     tabID,
+				Title:     title,
+				Spec:      fallbackPageJSON(title, description, query),
+			})
+			return requestID, nil
+		}
 	} else {
 		apiKey = readEnvValue("OPENAI_API_KEY")
 		if apiKey == "" {
@@ -288,8 +310,22 @@ func pageModeQuery(mode string, query string) string {
 }
 
 func (a *App) streamPage(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, generationMode string) {
-	fmt.Printf("[Generative Browser] page stream started requestID=%s tabID=%d mode=%s title=%q query=%q provider=openai model=%s generationMode=%s\n", requestID, tabID, mode, title, query, pageGenerationModel, generationMode)
+	provider := "openai"
+	model := pageGenerationModel
+	if generationMode == "superfast" {
+		provider = "cerebras"
+		model = "zai-glm-4.7"
+	} else if generationMode == "slow" {
+		provider = "gemini"
+		model = geminiSlowModel
+	}
+	fmt.Printf("[Generative Browser] page stream started requestID=%s tabID=%d mode=%s title=%q query=%q provider=%s model=%s generationMode=%s\n", requestID, tabID, mode, title, query, provider, model, generationMode)
 	a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
+
+	if isURL(query) {
+		a.scrapeDirectURL(requestID, tabID, title, query)
+		return
+	}
 
 	sources := []webSource{}
 	if mode == "sourced" && !isSimpleToolQuery(query+" "+title) {
@@ -324,10 +360,12 @@ func (a *App) streamPage(requestID string, tabID int64, title string, descriptio
 	})
 }
 
-
 func (a *App) generateFullPageFromSources(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource, generationMode string) (string, error) {
 	if generationMode == "superfast" {
 		return a.generateFullPageFromSourcesCerebras(requestID, tabID, title, description, query, mode, apiKey, sources)
+	}
+	if generationMode == "slow" {
+		return a.generateFullPageFromSourcesGemini(requestID, tabID, title, description, query, mode, apiKey, sources)
 	}
 
 	body := responsesRequest{
@@ -447,7 +485,39 @@ type cerebrasStreamResponse struct {
 		Delta struct {
 			Content string `json:"content"`
 		} `json:"delta"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
 	} `json:"choices"`
+}
+
+type geminiPart struct {
+	Text    string `json:"text"`
+	Thought bool   `json:"thought,omitempty"`
+}
+
+type geminiContent struct {
+	Role  string       `json:"role"`
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiThinkingConfig struct {
+	ThinkingLevel string `json:"thinkingLevel"`
+}
+
+type geminiGenerationConfig struct {
+	ThinkingConfig geminiThinkingConfig `json:"thinkingConfig"`
+}
+
+type geminiRequest struct {
+	Contents         []geminiContent        `json:"contents"`
+	GenerationConfig geminiGenerationConfig `json:"generationConfig"`
+}
+
+type geminiResponse struct {
+	Candidates []struct {
+		Content geminiContent `json:"content"`
+	} `json:"candidates"`
 }
 
 func (a *App) generateFullPageFromSourcesCerebras(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource) (string, error) {
@@ -510,7 +580,7 @@ func (a *App) tryGenerateFullPageFromSourcesCerebras(requestID string, tabID int
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer " + apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 150 * time.Second}
@@ -1086,7 +1156,7 @@ func (a *App) tryStreamSuggestionsCerebras(requestID string, tabID int64, query 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer " + apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 90 * time.Second}
@@ -1182,9 +1252,87 @@ func (a *App) tryStreamSuggestionsCerebras(requestID string, tabID int64, query 
 	return nil
 }
 
+func (a *App) streamSuggestionsGemini(requestID string, tabID int64, query string, apiKey string) {
+	maxRetries := 3
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			fmt.Printf("[Generative Browser] Retrying streamSuggestionsGemini, attempt %d/%d...\n", attempt, maxRetries)
+			a.emit("suggestions:started", suggestionEvent{
+				RequestID: requestID,
+				TabID:     tabID,
+				Query:     query,
+			})
+			time.Sleep(1 * time.Second)
+		}
+
+		err := a.tryStreamSuggestionsGemini(requestID, tabID, query, apiKey)
+		if err == nil {
+			return
+		}
+		lastErr = err
+	}
+
+	a.emitSuggestionError(requestID, tabID, query, fmt.Errorf("failed Gemini suggestions after %d attempts: %v", maxRetries, lastErr))
+}
+
+func (a *App) tryStreamSuggestionsGemini(requestID string, tabID int64, query string, apiKey string) error {
+	fmt.Printf("[Generative Browser] tryStreamSuggestionsGemini started requestID=%s tabID=%d query=%q provider=gemini model=%s tools=none\n", requestID, tabID, query, geminiSlowModel)
+
+	a.emit("suggestions:started", suggestionEvent{
+		RequestID: requestID,
+		TabID:     tabID,
+		Query:     query,
+	})
+
+	prompt := fmt.Sprintf("%s\n\nUser searched in Creative Search: %q. Suggest 5 creative generated app or website results.",
+		"You are Generative Browser's Creative Search suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"Creative app or website title\",\"description\":\"One vivid short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to generate\"}]}. Return exactly 5 suggestions in one JSON object. Every result can be imaginative. Do not rank by practicality. Keep each result connected to the user's search, but give each one a distinct creative angle, interface idea, or generated experience.",
+		query)
+	body := geminiRequest{
+		Contents: []geminiContent{
+			{Role: "user", Parts: []geminiPart{{Text: prompt}}},
+		},
+		GenerationConfig: geminiGenerationConfig{
+			ThinkingConfig: geminiThinkingConfig{ThinkingLevel: "MINIMAL"},
+		},
+	}
+
+	content, err := a.callGeminiStreamGenerateContent(body, apiKey, 90*time.Second)
+	if err != nil {
+		return err
+	}
+
+	items := extractSuggestions(content)
+	items = ensureFiveSuggestions(query, items)
+	if err := writeSuggestionsCache(query, items); err != nil {
+		fmt.Printf("[Generative Browser] suggestions cache write failed requestID=%s error=%v\n", requestID, err)
+	}
+	for _, item := range items {
+		copied := item
+		a.emit("suggestions:item", suggestionEvent{
+			RequestID: requestID,
+			TabID:     tabID,
+			Query:     query,
+			Item:      &copied,
+		})
+	}
+	a.emit("suggestions:done", suggestionEvent{
+		RequestID: requestID,
+		TabID:     tabID,
+		Query:     query,
+		Items:     items,
+	})
+	return nil
+}
+
 func (a *App) streamSuggestions(requestID string, tabID int64, query string, apiKey string, generationMode string) {
 	if generationMode == "superfast" {
 		a.streamSuggestionsCerebras(requestID, tabID, query, apiKey)
+		return
+	}
+	if generationMode == "slow" {
+		a.streamSuggestionsGemini(requestID, tabID, query, apiKey)
 		return
 	}
 
@@ -1954,4 +2102,261 @@ func newRequestID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(bytes)
+}
+
+func isURL(str string) bool {
+	str = strings.TrimSpace(str)
+	lower := strings.ToLower(str)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return true
+	}
+	if !strings.Contains(str, " ") && strings.Contains(str, ".") && len(str) > 3 {
+		return true
+	}
+	return false
+}
+
+func (a *App) scrapeDirectURL(requestID string, tabID int64, title string, query string) {
+	fmt.Printf("[Generative Browser] Direct URL detected: %s. Scraping directly without AI.\n", query)
+	a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: "[web] Fetching live website...\n"})
+
+	urlToFetch := query
+	if !strings.HasPrefix(strings.ToLower(urlToFetch), "http://") && !strings.HasPrefix(strings.ToLower(urlToFetch), "https://") {
+		urlToFetch = "https://" + urlToFetch
+	}
+
+	req, err := http.NewRequestWithContext(a.ctx, "GET", urlToFetch, nil)
+	if err != nil {
+		a.emitPageError(requestID, tabID, title, query, err)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Sec-Ch-Ua", `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		a.emitPageError(requestID, tabID, title, query, fmt.Errorf("failed to fetch URL: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		a.emitPageError(requestID, tabID, title, query, fmt.Errorf("failed to read response body: %v", err))
+		return
+	}
+
+	htmlContent := string(bodyBytes)
+
+	// Check if this response indicates a Cloudflare challenge or security verification wall
+	if isCloudflareOrBlocked(resp.StatusCode, htmlContent) {
+		fmt.Printf("[Generative Browser] Cloudflare/DDoS verification wall detected for %s. Using direct iframe source fallback.\n", urlToFetch)
+		a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: "[web] Security verification page detected. Loading natively in browser iframe...\n"})
+
+		specMap := map[string]interface{}{
+			"title":      title,
+			"subtitle":   "Live web page: " + urlToFetch,
+			"sourceUrl":  urlToFetch,
+			"mode":       "article",
+			"customHtml": "",
+			"customCss":  "",
+			"customJs":   "",
+			"iframeUrl":  urlToFetch,
+			"sections":   []map[string]interface{}{},
+		}
+
+		specBytes, err := json.Marshal(specMap)
+		if err != nil {
+			a.emitPageError(requestID, tabID, title, query, err)
+			return
+		}
+
+		spec := string(specBytes)
+		a.emitPage("page:done", pageEvent{
+			RequestID: requestID,
+			TabID:     tabID,
+			Title:     title,
+			Spec:      spec,
+		})
+		return
+	}
+
+	baseTag := fmt.Sprintf(`<base href="%s">`, urlToFetch)
+	var modifiedHTML string
+	if idx := strings.Index(strings.ToLower(htmlContent), "<head>"); idx != -1 {
+		modifiedHTML = htmlContent[:idx+6] + "\n" + baseTag + "\n" + htmlContent[idx+6:]
+	} else {
+		modifiedHTML = baseTag + "\n" + htmlContent
+	}
+
+	specMap := map[string]interface{}{
+		"title":      title,
+		"subtitle":   "Live web page: " + urlToFetch,
+		"sourceUrl":  urlToFetch,
+		"mode":       "article",
+		"customHtml": modifiedHTML,
+		"customCss":  "",
+		"customJs":   "",
+		"sections":   []map[string]interface{}{},
+	}
+
+	specBytes, err := json.Marshal(specMap)
+	if err != nil {
+		a.emitPageError(requestID, tabID, title, query, err)
+		return
+	}
+
+	spec := string(specBytes)
+	a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: "[web] Loaded live website successfully.\n"})
+	a.emitPage("page:done", pageEvent{
+		RequestID: requestID,
+		TabID:     tabID,
+		Title:     title,
+		Spec:      spec,
+	})
+}
+
+func isCloudflareOrBlocked(statusCode int, body string) bool {
+	if statusCode == 403 || statusCode == 503 || statusCode == 429 {
+		return true
+	}
+	lower := strings.ToLower(body)
+	indicators := []string{
+		"cloudflare",
+		"verify you are human",
+		"checking your browser",
+		"ddos-guard",
+		"sucuri",
+		"captcha",
+		"challenge-platform",
+		"just a moment...",
+	}
+	for _, ind := range indicators {
+		if strings.Contains(lower, ind) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) generateFullPageFromSourcesGemini(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource) (string, error) {
+	instructions := fullPageInstructions(mode)
+	promptBrief := pageGenerationBrief(title, description, query, mode, sources)
+	prompt := instructions + "\n\n" + promptBrief
+
+	body := geminiRequest{
+		Contents: []geminiContent{
+			{Role: "user", Parts: []geminiPart{{Text: prompt}}},
+		},
+		GenerationConfig: geminiGenerationConfig{
+			ThinkingConfig: geminiThinkingConfig{ThinkingLevel: "MINIMAL"},
+		},
+	}
+	fmt.Printf("[Generative Browser] Gemini page request started requestID=%s tabID=%d mode=%s title=%q query=%q provider=gemini model=%s tools=none\n", requestID, tabID, mode, title, query, geminiSlowModel)
+	a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Message: "thinking"})
+	content, err := a.callGeminiStreamGenerateContent(body, apiKey, 180*time.Second)
+	a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Message: "thinking-done"})
+	if err != nil {
+		return "", err
+	}
+
+	spec := extractJSONObject(content)
+	if spec == "" {
+		fmt.Printf("[Generative Browser] Gemini page response returned no JSON requestID=%s raw=%s\n", requestID, truncateForLog(content, 1200))
+		return "", fmt.Errorf("page generation returned no JSON")
+	}
+	a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: spec})
+	return spec, nil
+}
+
+func (a *App) callGeminiStreamGenerateContent(body geminiRequest, apiKey string, timeout time.Duration) (string, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+
+	apiURL := fmt.Sprintf(geminiGenerateContentURLTemplate, url.PathEscape(geminiSlowModel), url.QueryEscape(apiKey))
+	req, err := http.NewRequestWithContext(a.ctx, http.MethodPost, apiURL, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("Gemini streamGenerateContent returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	content := strings.TrimSpace(textFromGeminiResponseBody(string(responseBody)))
+	if content == "" {
+		return "", fmt.Errorf("Gemini streamGenerateContent returned empty content")
+	}
+	return content, nil
+}
+
+func textFromGeminiResponseBody(body string) string {
+	var responses []geminiResponse
+	if err := json.Unmarshal([]byte(body), &responses); err == nil {
+		return textFromGeminiResponses(responses)
+	}
+
+	var response geminiResponse
+	if err := json.Unmarshal([]byte(body), &response); err == nil {
+		return textFromGeminiResponses([]geminiResponse{response})
+	}
+
+	content := strings.Builder{}
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 4096), 8*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var event geminiResponse
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		content.WriteString(textFromGeminiResponses([]geminiResponse{event}))
+	}
+	return content.String()
+}
+
+func textFromGeminiResponses(responses []geminiResponse) string {
+	content := strings.Builder{}
+	for _, response := range responses {
+		for _, candidate := range response.Candidates {
+			for _, part := range candidate.Content.Parts {
+				if part.Thought {
+					continue
+				}
+				content.WriteString(part.Text)
+			}
+		}
+	}
+	return content.String()
 }

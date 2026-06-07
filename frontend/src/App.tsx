@@ -13,11 +13,12 @@ import {
 } from 'lucide-react';
 import './App.css';
 import {GeneratePageStream, SearchSuggestions} from '../wailsjs/go/main/App';
+import appLogo from './assets/images/logo.png';
 import {ClipboardSetText, EventsOn, Quit, WindowMinimise, WindowToggleMaximise} from '../wailsjs/runtime';
 
 type TabKind = 'search' | 'generated';
 type SearchMode = 'sourced' | 'creative';
-type GenerationMode = 'standard' | 'superfast';
+type GenerationMode = 'standard' | 'superfast' | 'slow';
 type SuggestionStatus = 'idle' | 'loading' | 'done' | 'error';
 type PageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -51,6 +52,7 @@ type Tab = {
     id: number;
     title: string;
     query: string;
+    commandInput?: string;
     kind: TabKind;
     searchMode: SearchMode;
     generationMode: GenerationMode;
@@ -64,6 +66,7 @@ type Tab = {
     pageSpec?: PageSpec;
     pageError?: string;
     pageStream?: string;
+    pageThinking?: boolean;
     history: TabHistoryEntry[];
 };
 
@@ -110,6 +113,7 @@ type PageSpec = {
     customHtml?: string;
     customCss?: string;
     customJs?: string;
+    iframeUrl?: string;
     theme?: {
         accent?: string;
         mood?: string;
@@ -120,6 +124,7 @@ type PageSpec = {
 type TabHistoryEntry = {
     title: string;
     query: string;
+    commandInput?: string;
     kind: TabKind;
     searchMode: SearchMode;
     generationMode: GenerationMode;
@@ -131,6 +136,7 @@ type TabHistoryEntry = {
     pageSpec?: PageSpec;
     pageError?: string;
     pageStream?: string;
+    pageThinking?: boolean;
 };
 
 type ContextMenuState = {
@@ -313,6 +319,7 @@ function normalizePageSpec(raw: unknown, result: SearchResult): PageSpec {
         customHtml: typeof value.customHtml === 'string' ? value.customHtml : undefined,
         customCss: typeof value.customCss === 'string' ? value.customCss : undefined,
         customJs: typeof value.customJs === 'string' ? value.customJs : undefined,
+        iframeUrl: typeof value.iframeUrl === 'string' ? value.iframeUrl : undefined,
         theme: {
             accent: value.theme?.accent || '#8ab4f8',
             mood: value.theme?.mood || 'clean',
@@ -403,6 +410,7 @@ function tabToHistoryEntry(tab: Tab): TabHistoryEntry {
     return {
         title: tab.title,
         query: tab.query,
+        commandInput: tab.commandInput,
         kind: tab.kind,
         searchMode: tab.searchMode,
         generationMode: tab.generationMode,
@@ -414,19 +422,30 @@ function tabToHistoryEntry(tab: Tab): TabHistoryEntry {
         pageSpec: tab.pageSpec,
         pageError: tab.pageError,
         pageStream: tab.pageStream,
+        pageThinking: tab.pageThinking,
     };
 }
 
 function App() {
     const [tabs, setTabs] = useState<Tab[]>(starterTabs);
     const [activeTabId, setActiveTabId] = useState(1);
-    const [command, setCommand] = useState('');
     const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
 
     const activeTab = useMemo(
         () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
         [activeTabId, tabs],
     );
+
+    const command = activeTab.commandInput !== undefined ? activeTab.commandInput : activeTab.query;
+    const setCommand = (value: string) => {
+        setTabs((currentTabs) =>
+            currentTabs.map((t) =>
+                t.id === activeTabId
+                    ? { ...t, commandInput: value }
+                    : t
+            )
+        );
+    };
     const isActiveTabLoading = activeTab.suggestionStatus === 'loading' || activeTab.pageStatus === 'loading';
     const canGoBack = activeTab.history.length > 0;
 
@@ -449,6 +468,7 @@ function App() {
             id: nextId,
             title: 'New search',
             query: '',
+            commandInput: '',
             kind: 'search',
             searchMode: activeTab?.searchMode || 'sourced',
             generationMode: activeTab?.generationMode || 'standard',
@@ -462,7 +482,6 @@ function App() {
 
         setTabs((currentTabs) => [...currentTabs, newTab]);
         setActiveTabId(nextId);
-        setCommand('');
     }
 
     function closeTab(tabId: number) {
@@ -475,7 +494,6 @@ function App() {
             const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
             if (activeTabId === tabId) {
                 setActiveTabId(nextTabs[nextTabs.length - 1].id);
-                setCommand(nextTabs[nextTabs.length - 1].query);
             }
             return nextTabs;
         });
@@ -483,7 +501,6 @@ function App() {
 
     function selectTab(tab: Tab) {
         setActiveTabId(tab.id);
-        setCommand(tab.query);
         setContextMenu(null);
     }
 
@@ -569,6 +586,7 @@ function App() {
                         history: pushHistory ? [...t.history, tabToHistoryEntry(t)] : t.history,
                         title: titleFromQuery(result.title),
                         query: result.query,
+                        commandInput: result.query,
                         kind: 'generated',
                         searchMode: mode,
                         requestId,
@@ -576,6 +594,7 @@ function App() {
                         pageSpec: undefined,
                         pageError: undefined,
                         pageStream: '',
+                        pageThinking: false,
                     }
                     : t,
             ),
@@ -600,7 +619,6 @@ function App() {
 
     function openInSameTab(result: SearchResult) {
         setContextMenu(null);
-        setCommand(result.query);
         loadPageInTab(activeTabId, result, true, activeTab.searchMode === 'sourced' ? 'sourced' : 'creative');
     }
 
@@ -612,6 +630,7 @@ function App() {
             id: nextId,
             title: titleFromQuery(result.query),
             query: result.query,
+            commandInput: result.query,
             kind: 'generated',
             searchMode: activeTab.searchMode === 'sourced' ? 'sourced' : 'creative',
             generationMode: activeTab.generationMode || 'standard',
@@ -627,7 +646,6 @@ function App() {
 
         setTabs((currentTabs) => [...currentTabs, newTab]);
         setActiveTabId(nextId);
-        setCommand(result.query);
         loadPageInTab(nextId, result, false, newTab.searchMode);
     }
 
@@ -787,6 +805,7 @@ function App() {
                         ? {
                             ...tab,
                             pageStream: '',
+                            pageThinking: false,
                         }
                         : tab,
                 ),
@@ -796,13 +815,23 @@ function App() {
         const offPageChunk = EventsOn('page:chunk', (event: PageEvent) => {
             setTabs((currentTabs) =>
                 currentTabs.map((tab) =>
-                    tab.id === event.tabId && tab.requestId === event.requestId
-                        ? {
+                    {
+                        if (tab.id !== event.tabId || tab.requestId !== event.requestId) {
+                            return tab;
+                        }
+                        if (event.message === 'thinking') {
+                            return {...tab, pageStatus: 'loading', pageThinking: true};
+                        }
+                        if (event.message === 'thinking-done') {
+                            return {...tab, pageStatus: 'loading', pageThinking: false};
+                        }
+                        return {
                             ...tab,
                             pageStatus: 'loading',
+                            pageThinking: false,
                             pageStream: `${tab.pageStream || ''}${event.chunk || ''}`,
-                        }
-                        : tab,
+                        };
+                    }
                 ),
             );
         });
@@ -817,13 +846,14 @@ function App() {
                     try {
                         const fallbackResult = tabToResult(tab);
                         const parsed = normalizePageSpec(JSON.parse(event.spec || '{}'), fallbackResult);
-                        return {...tab, pageStatus: 'ready', pageSpec: parsed, pageError: undefined};
+                        return {...tab, pageStatus: 'ready', pageSpec: parsed, pageError: undefined, pageThinking: false};
                     } catch (error) {
                         return {
                             ...tab,
                             pageStatus: 'error',
                             pageError: error instanceof Error ? error.message : String(error),
                             pageSpec: fallbackPageSpec(tabToResult(tab)),
+                            pageThinking: false,
                         };
                     }
                 }),
@@ -849,6 +879,7 @@ function App() {
                         pageStatus: 'error',
                         pageError: event.message || 'Page generation failed.',
                         pageSpec: fallback,
+                        pageThinking: false,
                     };
                 }),
             );
@@ -876,6 +907,33 @@ function App() {
         };
     }, []);
 
+    const openInNewTabRef = useRef(openInNewTab);
+    useEffect(() => {
+        openInNewTabRef.current = openInNewTab;
+    }, [openInNewTab]);
+
+    useEffect(() => {
+        const handleMessage = (event: MessageEvent) => {
+            if (event.data && event.data.type === 'open-link') {
+                const href = event.data.href;
+                if (!href) return;
+
+                const result: SearchResult = {
+                    id: `link-${Date.now()}`,
+                    title: href,
+                    description: `Visiting website: ${href}`,
+                    kind: 'website',
+                    query: href,
+                    url: href,
+                };
+
+                openInNewTabRef.current(result);
+            }
+        };
+        window.addEventListener('message', handleMessage);
+        return () => window.removeEventListener('message', handleMessage);
+    }, []);
+
     function runCommand(nextQuery = command) {
         const trimmedQuery = nextQuery.trim();
         if (!trimmedQuery) {
@@ -895,6 +953,9 @@ function App() {
         <main className="app-shell">
             <section className="workspace">
                 <div className="tab-strip">
+                    <div className="app-logo">
+                        <img src={appLogo} alt="Generative Browser" className="app-logo-img" />
+                    </div>
                     <div className="tabs">
                         {tabs.map((tab) => (
                             <div
@@ -966,9 +1027,14 @@ function App() {
                     </form>
                 </div>
 
-                <section className={`content ${hasIframe ? 'iframe-mode' : ''}`} onScroll={handleContentScroll}>
+                <section key={activeTab.id} className={`content ${hasIframe ? 'iframe-mode' : ''}`} onScroll={handleContentScroll}>
                     {!activeTab.query ? (
                         <div className="empty-state">
+                            <div className="empty-state-logo-container">
+                                <img src={appLogo} alt="Generative Browser" className="large-app-logo" />
+                                <h1>Generative Browser</h1>
+                                <p className="subtitle">Dream and build the web instantly</p>
+                            </div>
                             <div className="start-panel">
                                 <div className="start-copy">
                                     <span>Search mode</span>
@@ -1000,6 +1066,8 @@ function App() {
                                     <p>
                                         {activeTab.generationMode === 'superfast'
                                             ? 'Uses Cerebras AI API (GLM 4) for blazing fast generated pages.'
+                                            : activeTab.generationMode === 'slow'
+                                            ? 'Uses Google Gemma with minimal thinking for deliberate generated pages.'
                                             : 'Uses OpenAI GPT models for high-quality results.'}
                                     </p>
                                 </div>
@@ -1017,6 +1085,13 @@ function App() {
                                         type="button"
                                     >
                                         Super Fast
+                                    </button>
+                                    <button
+                                        className={activeTab.generationMode === 'slow' ? 'active' : ''}
+                                        onClick={() => setGenerationMode('slow')}
+                                        type="button"
+                                    >
+                                        Slow
                                     </button>
                                 </div>
                             </div>
@@ -1123,6 +1198,7 @@ function GeneratedPageView({tab}: {tab: Tab}) {
                     </div>
                     <span className="page-mode" style={{ color: 'var(--muted)', fontSize: '11px', fontWeight: 600 }}>
                         {tab.pageStream ? `${tab.pageStream.length.toLocaleString()} chars` : 'connecting...'}
+                        {tab.pageThinking ? ' · thinking...' : ''}
                     </span>
                 </div>
                 <div className="page-skeleton-body">
@@ -1163,7 +1239,7 @@ function GeneratedPage({spec, isStreaming}: {spec: PageSpec; isStreaming: boolea
         notes: [],
     });
 
-    if (spec.customHtml) {
+    if (spec.customHtml || spec.iframeUrl) {
         return <CustomGeneratedFrame spec={spec} />;
     }
 
@@ -1234,6 +1310,15 @@ ${spec.customCss || ''}
 <body>
 ${spec.customHtml || ''}
 <script>
+document.addEventListener('click', function(e) {
+  var a = e.target.closest('a');
+  if (a && a.getAttribute('href')) {
+    var href = a.getAttribute('href');
+    if (href.startsWith('#')) return;
+    e.preventDefault();
+    window.parent.postMessage({ type: 'open-link', href: a.href }, '*');
+  }
+});
 try {
 ${spec.customJs || ''}
 } catch (error) {
@@ -1258,12 +1343,21 @@ ${spec.customJs || ''}
                 </div>
                 <span className="page-mode">{spec.mode || 'mini app'}</span>
             </div>
-            <iframe
-                className="custom-page-frame"
-                sandbox="allow-scripts"
-                srcDoc={srcDoc}
-                title={spec.title}
-            />
+            {spec.iframeUrl ? (
+                <iframe
+                    className="custom-page-frame"
+                    sandbox="allow-scripts allow-forms allow-same-origin"
+                    src={spec.iframeUrl}
+                    title={spec.title}
+                />
+            ) : (
+                <iframe
+                    className="custom-page-frame"
+                    sandbox="allow-scripts allow-forms allow-same-origin"
+                    srcDoc={srcDoc}
+                    title={spec.title}
+                />
+            )}
         </div>
     );
 }
