@@ -163,7 +163,7 @@ function classifyQuery(query: string): TabKind {
 }
 
 function pageModeQuery(mode: SearchMode, query: string) {
-    return `__morph_mode:${mode}__\n${query}`;
+    return `__generative_browser_mode:${mode}__\n${query}`;
 }
 
 function titleFromQuery(query: string) {
@@ -185,17 +185,17 @@ function slugify(value: string) {
     return value
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '') || 'morph-result';
+        .replace(/^-|-$/g, '') || 'generative-browser-result';
 }
 
 function sourceFromKind(kind: string) {
     if (kind === 'website') {
-        return 'www.morph-web.local';
+        return 'www.generative-browser-web.local';
     }
     if (kind === 'tool') {
-        return 'tools.morph.local';
+        return 'tools.generative-browser.local';
     }
-    return 'apps.morph.local';
+    return 'apps.generative-browser.local';
 }
 
 function resultURL(result: AppSuggestion, index: number) {
@@ -336,7 +336,7 @@ function tabToResult(tab: Tab): SearchResult {
         return {
             id: `${tab.id}`,
             title,
-            description: tab.pageSpec?.subtitle || 'A generated Morph page.',
+            description: tab.pageSpec?.subtitle || 'A generated Generative Browser page.',
             kind: tab.kind,
         query: tab.query || tab.title,
         url: generatedPageUrl({title, query: tab.query || title, kind: tab.kind}),
@@ -344,7 +344,7 @@ function tabToResult(tab: Tab): SearchResult {
 }
 
 function generatedPageUrl(result: SearchResult | {title: string; query: string; kind?: string}) {
-    const host = result.kind === 'website' ? 'www.morph.local' : 'apps.morph.local';
+    const host = result.kind === 'website' ? 'www.generative-browser.local' : 'apps.generative-browser.local';
     return `https://${host}/${slugify(result.title || result.query)}`;
 }
 
@@ -512,7 +512,7 @@ function App() {
                 description: 'A sourced page built from DuckDuckGo results and scraped source metadata.',
                 kind: 'website',
                 query: trimmedQuery,
-                url: `https://sources.morph.local/${slugify(trimmedQuery)}`,
+                url: `https://sources.generative-browser.local/${slugify(trimmedQuery)}`,
             };
             loadPageInTab(tabId, result, true, 'sourced');
             return;
@@ -1216,16 +1216,16 @@ function CustomGeneratedFrame({spec}: {spec: PageSpec}) {
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-:root{color-scheme:dark;--morph-accent:#8ab4f8;--morph-bg:#101114;--morph-panel:rgba(255,255,255,.07);--morph-line:rgba(255,255,255,.14);--morph-text:#f5f7fb;--morph-muted:#b7bec9}
-html,body{margin:0;min-height:100%;background:var(--morph-bg);color:var(--morph-text);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;scrollbar-color:rgba(255,255,255,.35) transparent}
+:root{color-scheme:dark;--gb-accent:#8ab4f8;--gb-bg:#101114;--gb-panel:rgba(255,255,255,.07);--gb-line:rgba(255,255,255,.14);--gb-text:#f5f7fb;--gb-muted:#b7bec9}
+html,body{margin:0;min-height:100%;background:var(--gb-bg);color:var(--gb-text);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;scrollbar-color:rgba(255,255,255,.35) transparent}
 *{box-sizing:border-box}
 body{min-height:100vh}
 button,input,select,textarea{font:inherit}
-button{min-height:40px;border:0;border-radius:12px;background:var(--morph-accent);color:#101114;padding:0 16px;font-weight:750;cursor:pointer;box-shadow:0 10px 24px rgba(0,0,0,.18);transition:transform .16s ease,filter .16s ease}
+button{min-height:40px;border:0;border-radius:12px;background:var(--gb-accent);color:#101114;padding:0 16px;font-weight:750;cursor:pointer;box-shadow:0 10px 24px rgba(0,0,0,.18);transition:transform .16s ease,filter .16s ease}
 button:hover{filter:brightness(1.06);transform:translateY(-1px)}
 button:active{transform:translateY(0)}
-input,select,textarea{border:1px solid var(--morph-line);border-radius:12px;background:rgba(255,255,255,.08);color:var(--morph-text);padding:11px 12px;outline:none}
-a{color:var(--morph-accent)}
+input,select,textarea{border:1px solid var(--gb-line);border-radius:12px;background:rgba(255,255,255,.08);color:var(--gb-text);padding:11px 12px;outline:none}
+a{color:var(--gb-accent)}
 canvas{max-width:100%}
 main,section{max-width:100%}
 ${spec.customCss || ''}

@@ -29,8 +29,8 @@ const pageGenerationModel = "gpt-5.4-nano"
 const maxSuggestions = 5
 const cacheDirName = "cache"
 const cacheVersion = "v11-search-modes"
-const sourcedQueryPrefix = "__morph_mode:sourced__"
-const creativeQueryPrefix = "__morph_mode:creative__"
+const sourcedQueryPrefix = "__generative_browser_mode:sourced__"
+const creativeQueryPrefix = "__generative_browser_mode:creative__"
 
 // App struct
 type App struct {
@@ -151,7 +151,7 @@ func (a *App) SearchSuggestions(query string, tabID int64, requestID string, gen
 	}
 
 	if cached, ok := readSuggestionsCache(query); ok {
-		fmt.Printf("[Morph] suggestions cache hit requestID=%s query=%q items=%d\n", requestID, query, len(cached))
+		fmt.Printf("[Generative Browser] suggestions cache hit requestID=%s query=%q items=%d\n", requestID, query, len(cached))
 		go a.emitCachedSuggestions(requestID, tabID, query, cached)
 		return requestID, nil
 	}
@@ -219,7 +219,7 @@ func (a *App) GeneratePageStream(title string, description string, query string,
 	}
 
 	if cached, ok := readPageCache(title, description, mode+"\n"+query); ok {
-		fmt.Printf("[Morph] page cache hit requestID=%s title=%q query=%q bytes=%d\n", requestID, title, query, len(cached))
+		fmt.Printf("[Generative Browser] page cache hit requestID=%s title=%q query=%q bytes=%d\n", requestID, title, query, len(cached))
 		go func() {
 			a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
 			a.emitPage("page:done", pageEvent{
@@ -288,18 +288,18 @@ func pageModeQuery(mode string, query string) string {
 }
 
 func (a *App) streamPage(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, generationMode string) {
-	fmt.Printf("[Morph] page stream started requestID=%s tabID=%d mode=%s title=%q query=%q provider=openai model=%s generationMode=%s\n", requestID, tabID, mode, title, query, pageGenerationModel, generationMode)
+	fmt.Printf("[Generative Browser] page stream started requestID=%s tabID=%d mode=%s title=%q query=%q provider=openai model=%s generationMode=%s\n", requestID, tabID, mode, title, query, pageGenerationModel, generationMode)
 	a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
 
 	sources := []webSource{}
 	if mode == "sourced" && !isSimpleToolQuery(query+" "+title) {
 		foundSources, err := webSearch(queryForWebSearch(title, description, query), 6)
 		if err != nil {
-			fmt.Printf("[Morph] web search failed requestID=%s query=%q error=%v\n", requestID, query, err)
+			fmt.Printf("[Generative Browser] web search failed requestID=%s query=%q error=%v\n", requestID, query, err)
 			a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: "[web] Search failed; generating without live sources.\n"})
 		} else {
 			sources = foundSources
-			fmt.Printf("[Morph] web search completed requestID=%s query=%q sources=%d\n", requestID, query, len(sources))
+			fmt.Printf("[Generative Browser] web search completed requestID=%s query=%q sources=%d\n", requestID, query, len(sources))
 			a.emitPage("page:chunk", pageEvent{RequestID: requestID, TabID: tabID, Title: title, Chunk: fmt.Sprintf("[web] Found %d source(s).\n", len(sources))})
 		}
 	}
@@ -312,9 +312,9 @@ func (a *App) streamPage(requestID string, tabID int64, title string, descriptio
 	if mode == "sourced" {
 		spec = ensureSourcesInSpec(spec, sources)
 	}
-	fmt.Printf("[Morph] page stream completed requestID=%s bytes=%d sources=%d\n", requestID, len(spec), len(sources))
+	fmt.Printf("[Generative Browser] page stream completed requestID=%s bytes=%d sources=%d\n", requestID, len(spec), len(sources))
 	if err := writePageCache(title, description, mode+"\n"+query, spec); err != nil {
-		fmt.Printf("[Morph] page cache write failed requestID=%s error=%v\n", requestID, err)
+		fmt.Printf("[Generative Browser] page cache write failed requestID=%s error=%v\n", requestID, err)
 	}
 	a.emitPage("page:done", pageEvent{
 		RequestID: requestID,
@@ -392,14 +392,14 @@ func (a *App) generateFullPageFromSources(requestID string, tabID int64, title s
 
 		var event responseStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			fmt.Printf("[Morph] ignored malformed page stream event requestID=%s error=%v body=%s\n", requestID, err, truncateForLog(data, 500))
+			fmt.Printf("[Generative Browser] ignored malformed page stream event requestID=%s error=%v body=%s\n", requestID, err, truncateForLog(data, 500))
 			continue
 		}
 		if event.Type != "" {
 			seenEventTypes[event.Type]++
 		}
 		if event.Type == "response.incomplete" {
-			fmt.Printf("[Morph] OpenAI page response incomplete requestID=%s reason=%s event=%s\n", requestID, incompleteReason(event), truncateForLog(data, 700))
+			fmt.Printf("[Generative Browser] OpenAI page response incomplete requestID=%s reason=%s event=%s\n", requestID, incompleteReason(event), truncateForLog(data, 700))
 		}
 		if event.Error != nil {
 			return "", fmt.Errorf("OpenAI page stream error type=%s code=%s message=%s", event.Error.Type, event.Error.Code, event.Error.Message)
@@ -422,7 +422,7 @@ func (a *App) generateFullPageFromSources(requestID string, tabID int64, title s
 	}
 	spec := extractJSONObject(content.String())
 	if spec == "" {
-		fmt.Printf("[Morph] page stream returned no JSON requestID=%s eventTypes=%v raw=%s\n", requestID, seenEventTypes, truncateForLog(content.String(), 1200))
+		fmt.Printf("[Generative Browser] page stream returned no JSON requestID=%s eventTypes=%v raw=%s\n", requestID, seenEventTypes, truncateForLog(content.String(), 1200))
 		return "", fmt.Errorf("page generation returned no JSON")
 	}
 	return spec, nil
@@ -456,7 +456,7 @@ func (a *App) generateFullPageFromSourcesCerebras(requestID string, tabID int64,
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
-			fmt.Printf("[Morph] Retrying generateFullPageFromSourcesCerebras, attempt %d/%d...\n", attempt, maxRetries)
+			fmt.Printf("[Generative Browser] Retrying generateFullPageFromSourcesCerebras, attempt %d/%d...\n", attempt, maxRetries)
 			// Emit page:started to clear/reset the stream state in the frontend
 			a.emitPage("page:started", pageEvent{RequestID: requestID, TabID: tabID, Title: title})
 			time.Sleep(1 * time.Second)
@@ -477,7 +477,7 @@ func (a *App) generateFullPageFromSourcesCerebras(requestID string, tabID int64,
 }
 
 func (a *App) tryGenerateFullPageFromSourcesCerebras(requestID string, tabID int64, title string, description string, query string, mode string, apiKey string, sources []webSource) (string, error) {
-	fmt.Printf("[Morph] tryGenerateFullPageFromSourcesCerebras started requestID=%s tabID=%d mode=%s title=%q query=%q\n", requestID, tabID, mode, title, query)
+	fmt.Printf("[Generative Browser] tryGenerateFullPageFromSourcesCerebras started requestID=%s tabID=%d mode=%s title=%q query=%q\n", requestID, tabID, mode, title, query)
 	systemPrompt := fullPageInstructions(mode)
 	input := pageGenerationBrief(title, description, query, mode, sources)
 
@@ -563,7 +563,7 @@ func (a *App) tryGenerateFullPageFromSourcesCerebras(requestID string, tabID int
 	}
 	spec := extractJSONObject(content.String())
 	if spec == "" {
-		fmt.Printf("[Morph] Cerebras page stream returned no JSON requestID=%s raw=%s\n", requestID, truncateForLog(content.String(), 1200))
+		fmt.Printf("[Generative Browser] Cerebras page stream returned no JSON requestID=%s raw=%s\n", requestID, truncateForLog(content.String(), 1200))
 		return "", fmt.Errorf("page generation returned no JSON")
 	}
 	return spec, nil
@@ -574,7 +574,7 @@ func pageGenerationBrief(title string, description string, query string, mode st
 	if err != nil {
 		sourceJSON = []byte("[]")
 	}
-	return fmt.Sprintf(`Build this Morph generated website/app.
+	return fmt.Sprintf(`Build this Generative Browser generated website/app.
 
 Title: %s
 Description: %s
@@ -602,9 +602,9 @@ Rules:
 
 func fullPageInstructions(mode string) string {
 	if mode == "sourced" {
-		return "You are Morph's sourced-search page generator. Create one accurate, beautifully structured, bold, and informational HTML/CSS website from provided web sources. Enforce a premium, modern design with rich typography, clean grids, and prominent information display. Cite sources and factual information clearly. Return only one JSON object."
+		return "You are Generative Browser's sourced-search page generator. Create one accurate, beautifully structured, bold, and informational HTML/CSS website from provided web sources. Enforce a premium, modern design with rich typography, clean grids, and prominent information display. Cite sources and factual information clearly. Return only one JSON object."
 	}
-	return "You are Morph's creative-search page generator. Create one coherent, imaginative, bold, and polished generated page as JSON containing customHtml, customCss, and customJs. Return only one JSON object."
+	return "You are Generative Browser's creative-search page generator. Create one coherent, imaginative, bold, and polished generated page as JSON containing customHtml, customCss, and customJs. Return only one JSON object."
 }
 
 func queryForWebSearch(title string, description string, query string) string {
@@ -642,7 +642,7 @@ func webSearch(query string, limit int) ([]webSource, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 Morph/1.0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 GenerativeBrowser/1.0")
 
 	client := &http.Client{Timeout: 12 * time.Second}
 	resp, err := client.Do(req)
@@ -722,7 +722,7 @@ func fetchSourceImage(client *http.Client, sourceURL string) string {
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 Morph/1.0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 GenerativeBrowser/1.0")
 	resp, err := client.Do(req)
 	if err != nil {
 		return ""
@@ -810,7 +810,7 @@ func ensureSourcesInSpec(spec string, sources []webSource) string {
 		return spec
 	}
 	customHTML, _ := page["customHtml"].(string)
-	if strings.Contains(strings.ToLower(customHTML), "morph-source-list") {
+	if strings.Contains(strings.ToLower(customHTML), "generative-browser-source-list") {
 		return spec
 	}
 	customCSS, _ := page["customCss"].(string)
@@ -828,9 +828,9 @@ func ensureSourcesInSpec(spec string, sources []webSource) string {
 
 func sourceSectionHTML(sources []webSource) string {
 	var builder strings.Builder
-	builder.WriteString(`<section class="morph-source-list" aria-label="Sources"><h2>Sources</h2><div class="morph-source-grid">`)
+	builder.WriteString(`<section class="generative-browser-source-list" aria-label="Sources"><h2>Sources</h2><div class="generative-browser-source-grid">`)
 	for _, source := range sources {
-		builder.WriteString(`<a class="morph-source-card" href="`)
+		builder.WriteString(`<a class="generative-browser-source-card" href="`)
 		builder.WriteString(htmlText(source.URL, "#"))
 		builder.WriteString(`" target="_blank" rel="noreferrer">`)
 		if source.Image != "" {
@@ -849,14 +849,14 @@ func sourceSectionHTML(sources []webSource) string {
 }
 
 func sourceSectionCSS() string {
-	return `.morph-source-list{margin:32px auto 0;max-width:1100px;padding:24px;border-radius:22px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);box-sizing:border-box}.morph-source-list h2{margin:0 0 16px;font-size:clamp(22px,3vw,34px)}.morph-source-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.morph-source-card{display:grid;gap:8px;text-decoration:none;color:inherit;padding:14px;border-radius:16px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.12);overflow:hidden}.morph-source-card:hover{transform:translateY(-1px)}.morph-source-card img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:12px}.morph-source-card strong{font-size:15px}.morph-source-card span{font-size:13px;line-height:1.45;opacity:.78}`
+	return `.generative-browser-source-list{margin:32px auto 0;max-width:1100px;padding:24px;border-radius:22px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);box-sizing:border-box}.generative-browser-source-list h2{margin:0 0 16px;font-size:clamp(22px,3vw,34px)}.generative-browser-source-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.generative-browser-source-card{display:grid;gap:8px;text-decoration:none;color:inherit;padding:14px;border-radius:16px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.12);overflow:hidden}.generative-browser-source-card:hover{transform:translateY(-1px)}.generative-browser-source-card img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:12px}.generative-browser-source-card strong{font-size:15px}.generative-browser-source-card span{font-size:13px;line-height:1.45;opacity:.78}`
 }
 
 func assemblePageSpec(title string, description string, query string, html string, css string, js string) string {
 	spec := map[string]interface{}{
 		"title":      title,
 		"subtitle":   description,
-		"sourceUrl":  "https://apps.morph.local/" + slugForCache(title+" "+query),
+		"sourceUrl":  "https://apps.generative-browser.local/" + slugForCache(title+" "+query),
 		"mode":       pageModeForQuery(title + " " + query),
 		"customHtml": html,
 		"customCss":  css,
@@ -965,11 +965,11 @@ func (a *App) GeneratePage(title string, description string, query string, gener
 		return fallbackPageJSON(title, description, query), nil
 	}
 
-	fmt.Printf("[Morph] page generation started title=%q query=%q provider=openai model=%s\n", title, query, pageGenerationModel)
+	fmt.Printf("[Generative Browser] page generation started title=%q query=%q provider=openai model=%s\n", title, query, pageGenerationModel)
 
 	body := responsesRequest{
 		Model:           pageGenerationModel,
-		Instructions:    "You create compact JSON UI specs for Morph. Return only JSON. No markdown. The JSON must be safe and renderable with this schema: {\"title\":\"string\",\"subtitle\":\"string\",\"theme\":{\"accent\":\"#hex\",\"mood\":\"dark|clean|neon|calm\"},\"sections\":[{\"type\":\"hero|stats|cards|list|form|table|controls\",\"title\":\"string\",\"description\":\"string\",\"items\":[{\"title\":\"string\",\"description\":\"string\",\"value\":\"string\",\"label\":\"string\"}],\"fields\":[{\"label\":\"string\",\"placeholder\":\"string\"}],\"actions\":[{\"label\":\"string\",\"action\":\"increment|toggle|append|highlight\",\"target\":\"string\"}]}]}. Make the UI feel cool, functional, and specific to the title. Include 5 to 7 sections. Include at least one controls or form section and one stats/cards/list section.",
+		Instructions:    "You create compact JSON UI specs for Generative Browser. Return only JSON. No markdown. The JSON must be safe and renderable with this schema: {\"title\":\"string\",\"subtitle\":\"string\",\"theme\":{\"accent\":\"#hex\",\"mood\":\"dark|clean|neon|calm\"},\"sections\":[{\"type\":\"hero|stats|cards|list|form|table|controls\",\"title\":\"string\",\"description\":\"string\",\"items\":[{\"title\":\"string\",\"description\":\"string\",\"value\":\"string\",\"label\":\"string\"}],\"fields\":[{\"label\":\"string\",\"placeholder\":\"string\"}],\"actions\":[{\"label\":\"string\",\"action\":\"increment|toggle|append|highlight\",\"target\":\"string\"}]}]}. Make the UI feel cool, functional, and specific to the title. Include 5 to 7 sections. Include at least one controls or form section and one stats/cards/list section.",
 		Input:           fmt.Sprintf("Title: %s\nDescription: %s\nOriginal query: %s\nCreate the JSON UI page spec.", title, description, query),
 		MaxOutputTokens: 5000,
 		Stream:          false,
@@ -1021,10 +1021,10 @@ func (a *App) GeneratePage(title string, description string, query string, gener
 	}
 	spec := extractJSONObject(text.String())
 	if spec == "" {
-		fmt.Printf("[Morph] page generation returned no JSON; using fallback raw=%s\n", truncateForLog(text.String(), 900))
+		fmt.Printf("[Generative Browser] page generation returned no JSON; using fallback raw=%s\n", truncateForLog(text.String(), 900))
 		return fallbackPageJSON(title, description, query), nil
 	}
-	fmt.Printf("[Morph] page generation completed title=%q bytes=%d\n", title, len(spec))
+	fmt.Printf("[Generative Browser] page generation completed title=%q bytes=%d\n", title, len(spec))
 	return spec, nil
 }
 
@@ -1034,7 +1034,7 @@ func (a *App) streamSuggestionsCerebras(requestID string, tabID int64, query str
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
-			fmt.Printf("[Morph] Retrying streamSuggestionsCerebras, attempt %d/%d...\n", attempt, maxRetries)
+			fmt.Printf("[Generative Browser] Retrying streamSuggestionsCerebras, attempt %d/%d...\n", attempt, maxRetries)
 			// Emit suggestions:started to clear/reset suggestions state in frontend
 			a.emit("suggestions:started", suggestionEvent{
 				RequestID: requestID,
@@ -1055,12 +1055,12 @@ func (a *App) streamSuggestionsCerebras(requestID string, tabID int64, query str
 }
 
 func (a *App) tryStreamSuggestionsCerebras(requestID string, tabID int64, query string, apiKey string) error {
-	fmt.Printf("[Morph] tryStreamSuggestionsCerebras started requestID=%s tabID=%d query=%q\n", requestID, tabID, query)
+	fmt.Printf("[Generative Browser] tryStreamSuggestionsCerebras started requestID=%s tabID=%d query=%q\n", requestID, tabID, query)
 
 	body := cerebrasRequest{
 		Model: "zai-glm-4.7",
 		Messages: []cerebrasMessage{
-			{Role: "system", Content: "You are Morph's Creative Search suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"Creative app or website title\",\"description\":\"One vivid short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to generate\"}]}. Return exactly 5 suggestions in one JSON object. Every result can be imaginative. Do not rank by practicality. Keep each result connected to the user's search, but give each one a distinct creative angle, interface idea, or generated experience."},
+			{Role: "system", Content: "You are Generative Browser's Creative Search suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"Creative app or website title\",\"description\":\"One vivid short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to generate\"}]}. Return exactly 5 suggestions in one JSON object. Every result can be imaginative. Do not rank by practicality. Keep each result connected to the user's search, but give each one a distinct creative angle, interface idea, or generated experience."},
 			{Role: "user", Content: fmt.Sprintf("User searched in Creative Search: %q. Suggest 5 creative generated app or website results.", query)},
 		},
 		Stream:      true,
@@ -1157,7 +1157,7 @@ func (a *App) tryStreamSuggestionsCerebras(requestID string, tabID int64, query 
 	items := extractSuggestions(content.String())
 	items = ensureFiveSuggestions(query, items)
 	if err := writeSuggestionsCache(query, items); err != nil {
-		fmt.Printf("[Morph] suggestions cache write failed requestID=%s error=%v\n", requestID, err)
+		fmt.Printf("[Generative Browser] suggestions cache write failed requestID=%s error=%v\n", requestID, err)
 	}
 	for _, item := range items {
 		key := suggestionKey(item)
@@ -1188,7 +1188,7 @@ func (a *App) streamSuggestions(requestID string, tabID int64, query string, api
 		return
 	}
 
-	fmt.Printf("[Morph] suggestions request started requestID=%s tabID=%d query=%q provider=openai model=%s\n", requestID, tabID, query, suggestionModel)
+	fmt.Printf("[Generative Browser] suggestions request started requestID=%s tabID=%d query=%q provider=openai model=%s\n", requestID, tabID, query, suggestionModel)
 
 	a.emit("suggestions:started", suggestionEvent{
 		RequestID: requestID,
@@ -1198,7 +1198,7 @@ func (a *App) streamSuggestions(requestID string, tabID int64, query string, api
 
 	body := responsesRequest{
 		Model:           suggestionModel,
-		Instructions:    "You are Morph's Creative Search suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"Creative app or website title\",\"description\":\"One vivid short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to generate\"}]}. Return exactly 5 suggestions in one JSON object. Every result can be imaginative. Do not rank by practicality. Keep each result connected to the user's search, but give each one a distinct creative angle, interface idea, or generated experience.",
+		Instructions:    "You are Generative Browser's Creative Search suggestion engine. Return only JSON. No markdown. No prose. Shape: {\"suggestions\":[{\"id\":\"short-kebab-id\",\"title\":\"Creative app or website title\",\"description\":\"One vivid short sentence about what it opens or creates.\",\"kind\":\"website|generated_app|tool\",\"query\":\"actionable query to generate\"}]}. Return exactly 5 suggestions in one JSON object. Every result can be imaginative. Do not rank by practicality. Keep each result connected to the user's search, but give each one a distinct creative angle, interface idea, or generated experience.",
 		Input:           fmt.Sprintf("User searched in Creative Search: %q. Suggest 5 creative generated app or website results.", query),
 		MaxOutputTokens: 3500,
 		Stream:          true,
@@ -1269,14 +1269,14 @@ func (a *App) streamSuggestions(requestID string, tabID int64, query string, api
 
 		var event responseStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			fmt.Printf("[Morph] ignored malformed stream event requestID=%s error=%v body=%s\n", requestID, err, truncateForLog(data, 500))
+			fmt.Printf("[Generative Browser] ignored malformed stream event requestID=%s error=%v body=%s\n", requestID, err, truncateForLog(data, 500))
 			continue
 		}
 		if event.Type != "" {
 			seenEventTypes[event.Type]++
 		}
 		if event.Type == "response.incomplete" {
-			fmt.Printf("[Morph] OpenAI response incomplete requestID=%s reason=%s event=%s\n", requestID, incompleteReason(event), truncateForLog(data, 700))
+			fmt.Printf("[Generative Browser] OpenAI response incomplete requestID=%s reason=%s event=%s\n", requestID, incompleteReason(event), truncateForLog(data, 700))
 		}
 		if event.Error != nil {
 			err := fmt.Errorf("OpenAI stream error type=%s code=%s message=%s", event.Error.Type, event.Error.Code, event.Error.Message)
@@ -1321,11 +1321,11 @@ func (a *App) streamSuggestions(requestID string, tabID int64, query string, api
 
 	items := extractSuggestions(content.String())
 	if len(items) < maxSuggestions {
-		fmt.Printf("[Morph] suggestion stream produced %d parseable items; filling fallback requestID=%s eventTypes=%v raw=%s\n", len(items), requestID, seenEventTypes, truncateForLog(content.String(), 700))
+		fmt.Printf("[Generative Browser] suggestion stream produced %d parseable items; filling fallback requestID=%s eventTypes=%v raw=%s\n", len(items), requestID, seenEventTypes, truncateForLog(content.String(), 700))
 	}
 	items = ensureFiveSuggestions(query, items)
 	if err := writeSuggestionsCache(query, items); err != nil {
-		fmt.Printf("[Morph] suggestions cache write failed requestID=%s error=%v\n", requestID, err)
+		fmt.Printf("[Generative Browser] suggestions cache write failed requestID=%s error=%v\n", requestID, err)
 	}
 	for _, item := range items {
 		key := suggestionKey(item)
@@ -1341,7 +1341,7 @@ func (a *App) streamSuggestions(requestID string, tabID int64, query string, api
 			Item:      &copied,
 		})
 	}
-	fmt.Printf("[Morph] suggestions request completed requestID=%s items=%d eventTypes=%v\n", requestID, len(items), seenEventTypes)
+	fmt.Printf("[Generative Browser] suggestions request completed requestID=%s items=%d eventTypes=%v\n", requestID, len(items), seenEventTypes)
 	a.emit("suggestions:done", suggestionEvent{
 		RequestID: requestID,
 		TabID:     tabID,
@@ -1668,7 +1668,7 @@ func logRequestProblem(requestID string, query string, err error) {
 	if err == nil {
 		return
 	}
-	fmt.Printf("[Morph] suggestion request problem requestID=%s query=%q error=%v\n", requestID, query, err)
+	fmt.Printf("[Generative Browser] suggestion request problem requestID=%s query=%q error=%v\n", requestID, query, err)
 }
 
 func truncateForLog(value string, limit int) string {
@@ -1688,7 +1688,7 @@ func readSuggestionsCache(query string) ([]suggestion, bool) {
 
 	var items []suggestion
 	if err := json.Unmarshal(bytes, &items); err != nil {
-		fmt.Printf("[Morph] suggestions cache read failed path=%s error=%v\n", path, err)
+		fmt.Printf("[Generative Browser] suggestions cache read failed path=%s error=%v\n", path, err)
 		return nil, false
 	}
 	return ensureFiveSuggestions(query, items), true
@@ -1716,7 +1716,7 @@ func readPageCache(title string, description string, query string) (string, bool
 
 	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(spec), &decoded); err != nil {
-		fmt.Printf("[Morph] page cache read failed path=%s error=%v\n", path, err)
+		fmt.Printf("[Generative Browser] page cache read failed path=%s error=%v\n", path, err)
 		return "", false
 	}
 	return spec, true
@@ -1840,7 +1840,7 @@ func extractJSONObject(content string) string {
 
 func fallbackPageJSON(title string, description string, query string) string {
 	if description == "" {
-		description = "A generated Morph workspace built from the selected result."
+		description = "A generated Generative Browser workspace built from the selected result."
 	}
 	if query == "" {
 		query = title
@@ -1879,7 +1879,7 @@ func fallbackPageJSON(title string, description string, query string) string {
 			{
 				"type":        "cards",
 				"title":       "Generated modules",
-				"description": "Useful surfaces Morph can open from this result.",
+				"description": "Useful surfaces Generative Browser can open from this result.",
 				"items": []map[string]string{
 					{"title": titleCase(query) + " Dashboard", "description": "A live overview with metrics and next actions."},
 					{"title": titleCase(query) + " Planner", "description": "A compact board for steps, notes, and decisions."},

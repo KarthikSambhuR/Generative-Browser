@@ -1,4 +1,4 @@
-module Morph
+module Generative-Browser
 
 go 1.23.0
 
