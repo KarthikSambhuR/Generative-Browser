@@ -43,8 +43,8 @@ Add screenshots of your project here.
 ## How to Run Locally
 
 ```bash
-git clone <repo-url>
-cd <project-folder>
+git clone https://github.com/KarthikSambhuR/Generative-Browser
+cd Generative-Browser
 cd frontend
 npm install
 cd ..
